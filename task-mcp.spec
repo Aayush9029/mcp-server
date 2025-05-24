@@ -20,7 +20,7 @@ binary_name = f'task-mcp-{platform}-{arch}'
 is_windows = sys.platform.startswith('win')
 
 a = Analysis(
-    ['task_management_mcp/server.py'],
+    ['task_mcp/server.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -46,9 +46,9 @@ a = Analysis(
         'starlette.applications',
         'starlette.routing',
         'starlette.responses',
-        'task_management_mcp',
-        'task_management_mcp.models',
-        'task_management_mcp.server',
+        'task_mcp',
+        'task_mcp.models',
+        'task_mcp.server',
         'asyncio',
         'json',
         'logging',

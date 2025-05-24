@@ -2,7 +2,8 @@
 """Entry point for the task-mcp binary."""
 
 import sys
-from task_management_mcp import main
+
+from task_mcp import main
 
 if __name__ == "__main__":
     sys.exit(main())
