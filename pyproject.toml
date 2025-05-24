@@ -1,0 +1,66 @@
+[project]
+name = "task-management-mcp"
+version = "1.0.2"
+description = "MCP Server for Task Management API"
+authors = [
+    {name = "Aayush Pokharel", email = "developer@lovedoingthings.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+keywords = ["mcp", "task-management", "api", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.9.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Aayush9029/mcp-server"
+Documentation = "https://github.com/Aayush9029/mcp-server#readme"
+Repository = "https://github.com/Aayush9029/mcp-server"
+Issues = "https://github.com/Aayush9029/mcp-server/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-httpx>=0.32.0",
+    "build>=1.2.0",
+    "twine>=5.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = [
+    "*.py",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-httpx>=0.32.0",
+    "build>=1.2.0",
+    "twine>=5.1.0",
+]
+
+[project.scripts]
+task-mcp = "server:main"

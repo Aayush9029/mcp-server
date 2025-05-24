@@ -1,0 +1,49 @@
+name: Publish to PyPI
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types: [published]
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install UV
+      uses: astral-sh/setup-uv@v3
+      with:
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+    
+    - name: Install dependencies
+      run: |
+        uv pip install build twine
+    
+    - name: Build package
+      run: |
+        uv build
+    
+    - name: Check distribution
+      run: |
+        twine check dist/*
+    
+    - name: Publish to PyPI
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      run: |
+        twine upload dist/*
+    
+    - name: Verify installation
+      run: |
+        sleep 30  # Give PyPI time to update
+        uv pip install task-management-mcp --index-url https://pypi.org/simple/
