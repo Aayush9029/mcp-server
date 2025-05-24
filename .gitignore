@@ -28,7 +28,8 @@ MANIFEST
 
 # PyInstaller
 *.manifest
-*.spec
+# Keep task-mcp.spec in git
+# *.spec
 
 # Installer logs
 pip-log.txt
