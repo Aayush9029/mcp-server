@@ -293,7 +293,6 @@ Created by [Aayush Pokharel](https://aayush.art)
 
 - GitHub: [@Aayush9029](https://github.com/Aayush9029)
 - Twitter: [@aayushbuilds](https://x.com/aayushbuilds)
-- Email: [developer@lovedoingthings.com](mailto:developer@lovedoingthings.com)
 
 ## Acknowledgments
 
