@@ -5,10 +5,10 @@ on:
     branches:
       - main
     tags:
-      - 'v*.*.*'
+      - 'v*.*.*'  # Triggers when a version tag is pushed
   release:
-    types: [published]
-  workflow_dispatch:
+    types: [published]  # Triggers when a GitHub release is published
+  workflow_dispatch:  # Allows manual triggering
 
 jobs:
   build-and-publish:
@@ -34,7 +34,7 @@ jobs:
         uv run --with twine twine check dist/*
     
     - name: Publish to PyPI
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+      if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || github.event_name == 'release'
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
@@ -42,10 +42,12 @@ jobs:
         uv run --with twine twine upload dist/*
     
     - name: Verify installation
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+      if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || github.event_name == 'release'
       run: |
         sleep 60  # Give PyPI time to update
         uv venv verify-env
         uv pip install --python verify-env task-management-mcp --no-cache-dir
         # Test the installed command
-        uv run --python verify-env python -c "import server; import models; print('✅ Package imports work')"
+        uv run --python verify-env python -c "from task_management_mcp import TaskManagementMCP, models; print('✅ Package imports work')"
+        # Test the CLI
+        uv run --python verify-env task-mcp --help
