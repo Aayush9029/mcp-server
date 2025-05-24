@@ -25,17 +25,13 @@ jobs:
     - name: Set up Python
       run: uv python install 3.11
     
-    - name: Install dependencies
-      run: |
-        uv pip install --system build twine
-    
     - name: Build package
       run: |
         uv build
     
     - name: Check distribution
       run: |
-        twine check dist/*
+        uv run --with twine twine check dist/*
     
     - name: Publish to PyPI
       if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
@@ -43,12 +39,13 @@ jobs:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
       run: |
-        twine upload dist/*
+        uv run --with twine twine upload dist/*
     
     - name: Verify installation
       if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
       run: |
         sleep 60  # Give PyPI time to update
-        uv pip install --system task-management-mcp --no-cache-dir
+        uv venv verify-env
+        uv pip install --python verify-env task-management-mcp --no-cache-dir
         # Test the installed command
-        python -c "import server; import models; print('✅ Package imports work')"
+        uv run --python verify-env python -c "import server; import models; print('✅ Package imports work')"
