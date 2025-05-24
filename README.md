@@ -1,7 +1,7 @@
 # Task Management MCP Server
 
-[![PyPI version](https://badge.fury.io/py/task-management-mcp.svg)](https://badge.fury.io/py/task-management-mcp)
-[![Python](https://img.shields.io/pypi/pyversions/task-management-mcp.svg)](https://pypi.org/project/task-management-mcp/)
+[![PyPI version](https://badge.fury.io/py/task-mcp.svg)](https://badge.fury.io/py/task-mcp)
+[![Python](https://img.shields.io/pypi/pyversions/task-mcp.svg)](https://pypi.org/project/task-mcp/)
 [![Test](https://github.com/Aayush9029/mcp-server/actions/workflows/test.yml/badge.svg)](https://github.com/Aayush9029/mcp-server/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub](https://img.shields.io/github/stars/Aayush9029/mcp-server?style=social)](https://github.com/Aayush9029/mcp-server)
@@ -30,13 +30,13 @@ This MCP server provides a bridge between LLMs and task management APIs, allowin
 ### Via pip
 
 ```bash
-pip install task-management-mcp
+pip install task-mcp
 ```
 
 ### Via uv (recommended)
 
 ```bash
-uv add task-management-mcp
+uv add task-mcp
 ```
 
 ### Via uvx (no installation needed)
@@ -45,16 +45,16 @@ Run the server directly without installing:
 
 ```bash
 # Run with environment variable
-TASK_API_KEY=your_api_key uvx task-management-mcp
+TASK_API_KEY=your_api_key uvx task-mcp
 
 # Or run interactively (will prompt for API key if not set)
-uvx task-management-mcp
+uvx task-mcp
 ```
 
 ### Via pipx
 
 ```bash
-pipx install task-management-mcp
+pipx install task-mcp
 ```
 
 ### From source
@@ -84,7 +84,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "task-management": {
       "command": "uv",
-      "args": ["run", "task-management-mcp"],
+      "args": ["run", "task-mcp"],
       "env": {
         "TASK_API_KEY": "your_api_key_here"
       }
@@ -214,15 +214,18 @@ uv run pytest tests/test_server.py
 
 ```
 mcp-server/
-├── server.py          # Main MCP server implementation
-├── models.py          # Pydantic models for data validation
-├── __init__.py        # Package initialization
-├── pyproject.toml     # Project configuration
+├── task_mcp/          # Main package directory
+│   ├── __init__.py    # Package initialization
+│   ├── __main__.py    # Entry point for the MCP server
+│   ├── server.py      # Main MCP server implementation
+│   └── models.py      # Pydantic models for data validation
 ├── tests/             # Test suite
-│   ├── test_server.py
-│   └── test_models.py
-└── .github/
-    └── workflows/     # CI/CD pipelines
+│   ├── __init__.py
+│   └── test_basic.py
+├── pyproject.toml     # Project configuration
+├── README.md          # Project documentation
+├── LICENSE            # MIT License
+└── build_binary.py    # Script for building standalone binaries
 ```
 
 ### Contributing
