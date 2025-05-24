@@ -3,7 +3,6 @@
 [![PyPI version](https://badge.fury.io/py/task-management-mcp.svg)](https://badge.fury.io/py/task-management-mcp)
 [![Python](https://img.shields.io/pypi/pyversions/task-management-mcp.svg)](https://pypi.org/project/task-management-mcp/)
 [![Test](https://github.com/Aayush9029/mcp-server/actions/workflows/test.yml/badge.svg)](https://github.com/Aayush9029/mcp-server/actions/workflows/test.yml)
-[![Publish](https://github.com/Aayush9029/mcp-server/actions/workflows/publish.yml/badge.svg)](https://github.com/Aayush9029/mcp-server/actions/workflows/publish.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub](https://img.shields.io/github/stars/Aayush9029/mcp-server?style=social)](https://github.com/Aayush9029/mcp-server)
 
