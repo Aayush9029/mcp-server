@@ -174,6 +174,12 @@ class TaskManagementMCP:
                 text="Error: No API key configured. Please provide the API key in your MCP client configuration or download the MCP Client app from the Apple App Store to generate one."
             )]
         
+        if not self.api_key.startswith("ldtmcp-"):
+            return [TextContent(
+                type="text",
+                text="Error: Invalid API key format. API key must start with 'ldtmcp-' prefix."
+            )]
+        
         headers = {"X-API-Key": self.api_key}
         
         async with httpx.AsyncClient() as client:
@@ -281,7 +287,7 @@ class TaskManagementMCP:
     async def run(self):
         """Run the MCP server."""
         async with stdio_server() as (read_stream, write_stream):
-            await self.server.run(read_stream, write_stream)
+            await self.server.run(read_stream, write_stream, None)
 
 
 def main():

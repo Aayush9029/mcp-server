@@ -69,6 +69,8 @@ uv sync
 
 The MCP server connects to the Task Management API at `https://mcpclient.lovedoingthings.com`. The API key must be provided through your MCP client configuration.
 
+**API Key Format**: Your API key should start with `ldtmcp-`. To obtain a valid API key, download the MCP Client app from the Apple App Store.
+
 ### MCP Client Setup
 
 Add this server to your MCP client configuration:
