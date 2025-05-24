@@ -17,7 +17,7 @@ arch = os.environ.get('TARGET_ARCH', 'x86_64')
 binary_name = f'task-mcp-{platform}-{arch}'
 
 a = Analysis(
-    ['server.py'],
+    ['task_management_mcp/server.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -43,7 +43,9 @@ a = Analysis(
         'starlette.applications',
         'starlette.routing',
         'starlette.responses',
-        'models',
+        'task_management_mcp',
+        'task_management_mcp.models',
+        'task_management_mcp.server',
         'asyncio',
         'json',
         'logging',

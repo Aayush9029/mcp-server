@@ -40,12 +40,30 @@ pip install task-management-mcp
 uv add task-management-mcp
 ```
 
+### Via uvx (no installation needed)
+
+Run the server directly without installing:
+
+```bash
+# Run with environment variable
+TASK_API_KEY=your_api_key uvx task-management-mcp
+
+# Or run interactively (will prompt for API key if not set)
+uvx task-management-mcp
+```
+
+### Via pipx
+
+```bash
+pipx install task-management-mcp
+```
+
 ### From source
 
 ```bash
 git clone https://github.com/Aayush9029/mcp-server
 cd mcp-server
-uv install
+uv sync
 ```
 
 ## Configuration
@@ -172,7 +190,10 @@ cd mcp-server
 uv install
 
 # Run the development server
-uv run python server.py
+uv run task-mcp
+
+# Or run the module directly
+uv run python -m task_management_mcp
 ```
 
 ### Running Tests

@@ -12,7 +12,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent, EmbeddedResource
 
-from models import TaskCreate, TaskUpdate, TaskResponse, TaskListResponse, TaskStatus, TaskPriority
+from .models import TaskCreate, TaskUpdate, TaskResponse, TaskListResponse, TaskStatus, TaskPriority
 
 
 class TaskManagementMCP:

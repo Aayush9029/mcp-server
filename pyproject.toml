@@ -48,13 +48,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 include = [
-    "*.py",
+    "task_management_mcp/**/*.py",
     "README.md",
     "LICENSE",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = ["task_management_mcp"]
 
 [tool.uv]
 dev-dependencies = [
@@ -66,7 +66,7 @@ dev-dependencies = [
 ]
 
 [project.scripts]
-task-mcp = "server:main"
+task-mcp = "task_management_mcp:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
