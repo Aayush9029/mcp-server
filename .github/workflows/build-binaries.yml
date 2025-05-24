@@ -1,0 +1,172 @@
+name: Build Binaries
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to build (e.g., v1.0.3)'
+        required: false
+        type: string
+
+jobs:
+  build-binaries:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x86_64
+          - os: macos-latest
+            platform: darwin
+            arch: x86_64
+          - os: macos-latest
+            platform: darwin
+            arch: arm64
+          - os: windows-latest
+            platform: windows
+            arch: x86_64
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.7.8"
+          enable-cache: true
+      
+      - name: Set up Python
+        run: uv python install 3.11
+      
+      - name: Install dependencies
+        run: |
+          uv sync --all-extras
+          uv pip install pyinstaller
+      
+      - name: Build binary
+        run: |
+          # Set architecture for macOS
+          if [[ "${{ matrix.platform }}" == "darwin" && "${{ matrix.arch }}" == "arm64" ]]; then
+            export ARCHFLAGS="-arch arm64"
+            export _PYTHON_HOST_PLATFORM="macosx-11.0-arm64"
+          fi
+          
+          # Set target architecture
+          export TARGET_ARCH="${{ matrix.arch }}"
+          
+          # Build the binary using our build script
+          uv run python build_binary.py
+        shell: bash
+      
+      - name: Test binary (Unix)
+        if: matrix.platform != 'windows'
+        run: |
+          ./dist/task-mcp-${{ matrix.platform }}-${{ matrix.arch }} --help || true
+        shell: bash
+      
+      - name: Test binary (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          ./dist/task-mcp-${{ matrix.platform }}-${{ matrix.arch }}.exe --help
+        shell: pwsh
+      
+      - name: Compress binary (Unix)
+        if: matrix.platform != 'windows'
+        run: |
+          cd dist
+          tar -czf task-mcp-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz task-mcp-${{ matrix.platform }}-${{ matrix.arch }}
+      
+      - name: Compress binary (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          cd dist
+          Compress-Archive -Path "task-mcp-${{ matrix.platform }}-${{ matrix.arch }}.exe" -DestinationPath "task-mcp-${{ matrix.platform }}-${{ matrix.arch }}.zip"
+        shell: pwsh
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  create-release:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: List artifacts
+        run: ls -la artifacts/*/
+      
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -name "*.tar.gz" -o -name "*.zip" | while read file; do
+            cp "$file" release-assets/
+          done
+          ls -la release-assets/
+      
+      - name: Get version
+        id: get_version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.version }}" ]]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          name: "Release ${{ steps.get_version.outputs.version }}"
+          body: |
+            ## Binary Downloads
+            
+            Pre-built binaries for task-mcp are available below:
+            
+            ### macOS
+            - Intel: `task-mcp-darwin-x86_64.tar.gz`
+            - Apple Silicon: `task-mcp-darwin-arm64.tar.gz`
+            
+            ### Linux
+            - x86_64: `task-mcp-linux-x86_64.tar.gz`
+            
+            ### Windows
+            - x86_64: `task-mcp-windows-x86_64.zip`
+            
+            ## Installation
+            
+            1. Download the appropriate binary for your platform
+            2. Extract the archive
+            3. Make the binary executable (Unix only): `chmod +x task-mcp-*`
+            4. Move to your PATH or run directly
+            
+            ## Usage
+            
+            ```bash
+            # Run the MCP server
+            ./task-mcp-<platform>-<arch>
+            
+            # Or if in PATH
+            task-mcp
+            ```
+          files: |
+            release-assets/*
+          draft: false
+          prerelease: false

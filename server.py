@@ -1,6 +1,7 @@
 """MCP Server for Task Management API."""
 
 import os
+import sys
 import json
 import asyncio
 from typing import Any, Optional
@@ -22,15 +23,17 @@ class TaskManagementMCP:
         self.base_url = "https://mcpclient.lovedoingthings.com"
         self.api_key = os.getenv("TASK_API_KEY", "")
         
-        # Register tools
-        self.server.add_tool(self._create_task_tool())
-        self.server.add_tool(self._list_tasks_tool())
-        self.server.add_tool(self._get_task_tool())
-        self.server.add_tool(self._update_task_tool())
-        self.server.add_tool(self._delete_task_tool())
+        # Store tools
+        self.tools = [
+            self._create_task_tool(),
+            self._list_tasks_tool(),
+            self._get_task_tool(),
+            self._update_task_tool(),
+            self._delete_task_tool()
+        ]
         
-        # Register tool handlers
-        self.server.set_tool_handler(self._handle_tool_call)
+        # Register handlers
+        self._register_handlers()
     
     def _create_task_tool(self) -> Tool:
         """Define the create task tool."""
@@ -155,6 +158,16 @@ class TaskManagementMCP:
             }
         )
     
+    def _register_handlers(self):
+        """Register all handlers with the server."""
+        @self.server.list_tools()
+        async def handle_list_tools() -> list[Tool]:
+            return self.tools
+        
+        @self.server.call_tool()
+        async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+            return await self._handle_tool_call(name, arguments)
+    
     async def _handle_tool_call(self, name: str, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle tool calls."""
         if not self.api_key:
@@ -273,11 +286,32 @@ class TaskManagementMCP:
             await self.server.run(read_stream, write_stream)
 
 
-async def main():
+def main():
     """Main entry point."""
+    import sys
+    
+    # Simple argument handling
+    if len(sys.argv) > 1 and sys.argv[1] in ["--help", "-h"]:
+        print("Task Management MCP Server")
+        print("\nUsage: task-mcp [options]")
+        print("\nOptions:")
+        print("  --help, -h    Show this help message")
+        print("\nEnvironment Variables:")
+        print("  TASK_API_KEY  API key for the task management service")
+        print("\nThis server implements the Model Context Protocol (MCP)")
+        print("and provides tools for managing tasks via API.")
+        return 0
+    
+    # Run the server
+    asyncio.run(run_server())
+    return 0
+
+
+async def run_server():
+    """Run the MCP server."""
     mcp = TaskManagementMCP()
     await mcp.run()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(main())

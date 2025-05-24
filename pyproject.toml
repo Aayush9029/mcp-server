@@ -38,6 +38,9 @@ dev = [
     "build>=1.2.0",
     "twine>=5.1.0",
 ]
+build = [
+    "pyinstaller>=6.0.0",
+]
 
 [build-system]
 requires = ["hatchling"]
