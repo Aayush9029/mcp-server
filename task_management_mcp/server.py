@@ -4,15 +4,13 @@ import os
 import sys
 import json
 import asyncio
-from typing import Any, Optional
-from datetime import datetime
 
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent, EmbeddedResource
+from mcp.types import Tool, TextContent
 
-from .models import TaskCreate, TaskUpdate, TaskResponse, TaskListResponse, TaskStatus, TaskPriority
+from task_management_mcp.models import TaskCreate, TaskUpdate, TaskResponse, TaskListResponse
 
 
 class TaskManagementMCP:
