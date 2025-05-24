@@ -25,10 +25,6 @@ jobs:
           - os: macos-latest
             platform: darwin
             arch: arm64
-          # Windows build temporarily disabled due to PyInstaller issues
-          # - os: windows-latest
-          #   platform: windows
-          #   arch: x86_64
     
     runs-on: ${{ matrix.os }}
     
@@ -64,38 +60,21 @@ jobs:
           uv run python build_binary.py
         shell: bash
       
-      - name: Test binary (Unix)
-        if: matrix.platform != 'windows'
+      - name: Test binary
         run: |
           ./dist/task-mcp-${{ matrix.platform }}-${{ matrix.arch }} --help || true
         shell: bash
       
-      - name: Test binary (Windows)
-        if: matrix.platform == 'windows'
-        run: |
-          ./dist/task-mcp-${{ matrix.platform }}-${{ matrix.arch }}.exe --help
-        shell: pwsh
-      
-      - name: Compress binary (Unix)
-        if: matrix.platform != 'windows'
+      - name: Compress binary
         run: |
           cd dist
           tar -czf task-mcp-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz task-mcp-${{ matrix.platform }}-${{ matrix.arch }}
-      
-      - name: Compress binary (Windows)
-        if: matrix.platform == 'windows'
-        run: |
-          cd dist
-          Compress-Archive -Path "task-mcp-${{ matrix.platform }}-${{ matrix.arch }}.exe" -DestinationPath "task-mcp-${{ matrix.platform }}-${{ matrix.arch }}.zip"
-        shell: pwsh
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.platform }}-${{ matrix.arch }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
+          path: dist/*.tar.gz
 
   create-release:
     needs: build-binaries
@@ -117,7 +96,7 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          find artifacts -name "*.tar.gz" -o -name "*.zip" | while read file; do
+          find artifacts -name "*.tar.gz" | while read file; do
             cp "$file" release-assets/
           done
           ls -la release-assets/
@@ -148,14 +127,11 @@ jobs:
             ### Linux
             - x86_64: `task-mcp-linux-x86_64.tar.gz`
             
-            ### Windows
-            - Currently unavailable (coming soon)
-            
             ## Installation
             
             1. Download the appropriate binary for your platform
             2. Extract the archive
-            3. Make the binary executable (Unix only): `chmod +x task-mcp-*`
+            3. Make the binary executable: `chmod +x task-mcp-*`
             4. Move to your PATH or run directly
             
             ## Usage
