@@ -1,0 +1,69 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.3)'
+        required: true
+        type: string
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        version: "0.7.8"
+    
+    - name: Validate version format
+      run: |
+        if ! echo "${{ inputs.version }}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "Error: Version must be in format X.Y.Z"
+          exit 1
+        fi
+    
+    - name: Update version in pyproject.toml
+      run: |
+        sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' pyproject.toml
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git add pyproject.toml
+        git commit -m "✨ Bump version to ${{ inputs.version }}"
+    
+    - name: Create and push tag
+      run: |
+        git tag -a "v${{ inputs.version }}" -m "Release v${{ inputs.version }}"
+        git push origin main "v${{ inputs.version }}"
+    
+    - name: Generate changelog
+      id: changelog
+      run: |
+        echo "## What's Changed" > changelog.md
+        echo "" >> changelog.md
+        # Get commits since last tag
+        LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        if [ -z "$LAST_TAG" ]; then
+          git log --pretty=format:"* %s (%h)" >> changelog.md
+        else
+          git log ${LAST_TAG}..HEAD --pretty=format:"* %s (%h)" >> changelog.md
+        fi
+        echo "" >> changelog.md
+        echo "" >> changelog.md
+        echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${LAST_TAG}...v${{ inputs.version }}" >> changelog.md
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: "v${{ inputs.version }}"
+        name: "Release v${{ inputs.version }}"
+        body_path: changelog.md
+        draft: false
+        prerelease: false

@@ -19,7 +19,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v5
       with:
-        version: "0.5.21"
+        version: "0.7.8"
         enable-cache: true
         cache-dependency-glob: "uv.lock"
         python-version: ${{ matrix.python-version }}
@@ -36,3 +36,13 @@ jobs:
       run: |
         uv build
         uv run twine check dist/*
+    
+    - name: Test installation
+      run: |
+        # Test pip installation in a fresh environment
+        uv venv test-env
+        source test-env/bin/activate || source test-env/Scripts/activate
+        uv pip install dist/*.whl
+        python -c "import server; import models; print('✅ Package imports work')"
+        deactivate || true
+        rm -rf test-env
