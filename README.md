@@ -100,7 +100,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "task-management": {
       "command": "python",
-      "args": ["-m", "task_management_mcp"],
+      "args": ["-m", "task_mcp"],
       "env": {
         "TASK_API_KEY": "your_api_key_here"
       }
@@ -194,7 +194,7 @@ uv install
 uv run task-mcp
 
 # Or run the module directly
-uv run python -m task_management_mcp
+uv run python -m task_mcp
 ```
 
 ### Running Tests

@@ -6,7 +6,7 @@ def test_imports():
     assert models is not None
 
 
-def test_task_management_mcp_class():
+def test_task_mcp_class():
     """Test that the main class can be imported."""
     from task_mcp import TaskManagementMCP
 

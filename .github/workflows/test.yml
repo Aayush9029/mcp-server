@@ -43,6 +43,6 @@ jobs:
         uv venv test-env
         source test-env/bin/activate || source test-env/Scripts/activate
         uv pip install dist/*.whl
-        python -c "import task_management_mcp.server; import task_management_mcp.models; print('✅ Package imports work')"
+        python -c "import task_mcp.server; import task_mcp.models; print('✅ Package imports work')"
         deactivate || true
         rm -rf test-env

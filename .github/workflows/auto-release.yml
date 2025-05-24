@@ -187,9 +187,9 @@ jobs:
       run: |
         sleep 60  # Give PyPI time to update
         uv venv verify-env
-        uv pip install --python verify-env task-management-mcp==${{ needs.prepare-release.outputs.version }} --no-cache-dir
+        uv pip install --python verify-env task-mcp==${{ needs.prepare-release.outputs.version }} --no-cache-dir
         # Test the installed command
-        uv run --python verify-env python -c "from task_management_mcp import TaskManagementMCP, models; print('✅ Package imports work')"
+        uv run --python verify-env python -c "from task_mcp import models; print('✅ Package imports work')"
         # Test the CLI
         uv run --python verify-env task-mcp --help
 
@@ -236,7 +236,7 @@ jobs:
           echo "" >> $GITHUB_OUTPUT
           echo "### PyPI" >> $GITHUB_OUTPUT
           echo '```bash' >> $GITHUB_OUTPUT
-          echo "pip install task-management-mcp==${{ needs.prepare-release.outputs.version }}" >> $GITHUB_OUTPUT
+          echo "pip install task-mcp==${{ needs.prepare-release.outputs.version }}" >> $GITHUB_OUTPUT
           echo '```' >> $GITHUB_OUTPUT
           echo "" >> $GITHUB_OUTPUT
           echo "### Binary Downloads" >> $GITHUB_OUTPUT
