@@ -16,6 +16,9 @@ elif platform.startswith('win'):
 arch = os.environ.get('TARGET_ARCH', 'x86_64')
 binary_name = f'task-mcp-{platform}-{arch}'
 
+# Windows-specific configuration
+is_windows = sys.platform.startswith('win')
+
 a = Analysis(
     ['task_management_mcp/server.py'],
     pathex=[],
@@ -53,6 +56,12 @@ a = Analysis(
         'datetime',
         'uuid',
         'enum',
+        # Windows-specific imports
+        'encodings',
+        'encodings.utf_8',
+        'encodings.ascii',
+        'encodings.latin_1',
+        'encodings.cp1252',
     ],
     hookspath=[],
     hooksconfig={},
@@ -70,29 +79,53 @@ a = Analysis(
         'PySide6',
     ],
     noarchive=False,
-    optimize=2,
+    optimize=1 if is_windows else 2,  # Less optimization for Windows
 )
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name=binary_name,
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=True,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=None,
-)
+# Different configuration for Windows vs Unix
+if is_windows:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name=binary_name,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,  # Don't strip on Windows
+        upx=False,  # Disable UPX on Windows to avoid DLL issues
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=True,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=None,
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name=binary_name,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=True,
+        upx=True,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=True,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=None,
+    )
