@@ -189,9 +189,9 @@ jobs:
         uv venv verify-env
         uv pip install --python verify-env task-mcp --no-cache-dir
         # Test the installed command
-        uv run --python verify-env python -c "from task_mcp import models; print('✅ Package imports work')"
+        TASK_API_KEY=test-key uv run --python verify-env python -c "import task_mcp_server; print('✅ Package imports work')"
         # Test the CLI
-        uv run --python verify-env task-mcp --help
+        TASK_API_KEY=test-key uv run --python verify-env task-mcp --help
 
   create-release:
     needs: [prepare-release, build-binaries, publish-pypi]
