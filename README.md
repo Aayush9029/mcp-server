@@ -1,7 +1,5 @@
 # Task Management MCP Server
 
-<a href="https://glama.ai/mcp/servers/vktfj0m5y0"><img width="380" height="200" src="https://glama.ai/mcp/servers/vktfj0m5y0/badge" alt="Task Management API Server MCP server" /></a>
-
 [![PyPI version](https://badge.fury.io/py/task-mcp.svg)](https://badge.fury.io/py/task-mcp)
 [![Python](https://img.shields.io/pypi/pyversions/task-mcp.svg)](https://pypi.org/project/task-mcp/)
 [![Test](https://github.com/Aayush9029/mcp-server/actions/workflows/test.yml/badge.svg)](https://github.com/Aayush9029/mcp-server/actions/workflows/test.yml)
