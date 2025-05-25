@@ -1,16 +1,16 @@
 [project]
-name = "task-mcp"
-version = "1.0.11"
-description = "MCP Server for Task Management API"
+name = "task-mcp-server"
+version = "2.0.0"
+description = "FastMCP Server for Task Management API"
 authors = [
     {name = "Aayush Pokharel", email = "developer@lovedoingthings.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
-keywords = ["mcp", "task", "api", "llm"]
+keywords = ["mcp", "fastmcp", "task", "api", "llm", "claude"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -22,7 +22,7 @@ dependencies = [
     "mcp>=1.0.0",
     "httpx>=0.27.0",
     "pydantic>=2.9.0",
-    "click>=8.1.0",
+    "pydantic-settings>=2.0.0",
 ]
 
 [project.urls]
@@ -49,13 +49,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 include = [
-    "task_mcp/**/*.py",
+    "task_mcp_server.py",
     "README.md",
     "LICENSE",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["task_mcp"]
+packages = ["task_mcp_server"]
 
 [tool.uv]
 dev-dependencies = [
@@ -71,7 +71,7 @@ dev-dependencies = [
 ]
 
 [project.scripts]
-task-mcp = "task_mcp.__main__:main"
+task-mcp-server = "task_mcp_server:mcp.run"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

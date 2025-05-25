@@ -36,7 +36,7 @@ def build_binary():
         shutil.rmtree("dist")
 
     # Run PyInstaller with spec file
-    cmd = [sys.executable, "-m", "PyInstaller", "task-mcp.spec", "--clean"]
+    cmd = [sys.executable, "-m", "PyInstaller", "task-mcp-server.spec", "--clean"]
 
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
