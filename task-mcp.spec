@@ -20,7 +20,7 @@ binary_name = f'task-mcp-{platform}-{arch}'
 is_windows = sys.platform.startswith('win')
 
 a = Analysis(
-    ['__main__.py'],
+    ['task_mcp_server.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -44,10 +44,7 @@ a = Analysis(
         'click.formatting',
         'click.parser',
         'click.types',
-        'task_mcp',
-        'task_mcp.__main__',
-        'task_mcp.models',
-        'task_mcp.server',
+        'task_mcp_server',
         'asyncio',
         'json',
         'logging',
