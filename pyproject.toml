@@ -1,7 +1,7 @@
 [project]
-name = "task-mcp-server"
-version = "2.0.0"
-description = "FastMCP Server for Task Management API"
+name = "task-mcp"
+version = "1.0.11"
+description = "MCP Server for Task Management API"
 authors = [
     {name = "Aayush Pokharel", email = "developer@lovedoingthings.com"}
 ]
