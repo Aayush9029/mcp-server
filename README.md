@@ -6,102 +6,85 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub](https://img.shields.io/github/stars/Aayush9029/mcp-server?style=social)](https://github.com/Aayush9029/mcp-server)
 
-A Model Context Protocol (MCP) server that enables Large Language Models (LLMs) to interact with task management systems through a standardized protocol. This server uses stdio transport for communication, making it compatible with Claude Desktop, Cursor, and other MCP clients.
+A Model Context Protocol (MCP) server that provides LLMs with tools to manage tasks through a secure REST API. Built with FastMCP for seamless integration with Claude Desktop, Cursor, and other MCP clients.
 
-## Overview
+## What is this?
 
-This MCP server provides a bridge between LLMs and task management APIs, allowing AI assistants to:
-- Create, read, update, and delete tasks
-- Manage task priorities and statuses
-- Handle task notifications
-- Maintain secure, user-specific task lists through API key authentication
+This MCP server acts as a bridge between AI assistants and a task management API, enabling them to:
+- ✅ Create, read, update, and delete tasks
+- 🎯 Set priorities (LOW, MEDIUM, HIGH, URGENT) and track status (TODO, IN_PROGRESS, DONE, CANCELLED)
+- 🔔 Manage task notifications
+- 🔐 Maintain secure, isolated task lists via API key authentication
 
-## Features
-
-- **Full CRUD Operations**: Complete task lifecycle management
-- **Rich Task Attributes**: Status (TODO, IN_PROGRESS, DONE, CANCELLED), priority levels (LOW, MEDIUM, HIGH, URGENT)
-- **Notification Support**: Toggle notifications for individual tasks
-- **Secure Multi-tenancy**: API key-based authentication ensures data isolation
-- **MCP Protocol Compliance**: Follows the Model Context Protocol specification with stdio transport
-- **Async Architecture**: Built with Python async/await for optimal performance
-- **Type Safety**: Comprehensive Pydantic models for data validation
-- **Filtering & Pagination**: List tasks with status/priority filtering and pagination support
+The server wraps around a FastAPI backend at `https://mcpclient.lovedoingthings.com` and exposes task management capabilities through the MCP protocol.
 
 ## Installation
 
-### Via pip
+### Quick Start with uvx (Recommended - No installation needed!)
 
 ```bash
-pip install task-mcp
-```
-
-### Via uv (recommended)
-
-```bash
-uv add task-mcp
-```
-
-### Via uvx (recommended - no installation needed)
-
-Run the server directly without installing:
-
-```bash
-# Run with API key from environment
+# Run directly with API key from environment
 TASK_API_KEY=your_api_key uvx task-mcp
 
 # Or pass API key as argument
 uvx task-mcp --api-key YOUR_API_KEY
 
-# View help and options
+# View help
 uvx task-mcp -h
 ```
 
-### Via pipx
+### Other Installation Methods
+
+<details>
+<summary>Via pip</summary>
+
+```bash
+pip install task-mcp
+```
+</details>
+
+<details>
+<summary>Via uv</summary>
+
+```bash
+uv add task-mcp
+```
+</details>
+
+<details>
+<summary>Via pipx</summary>
 
 ```bash
 pipx install task-mcp
 ```
+</details>
 
-### From source
+<details>
+<summary>From source</summary>
 
 ```bash
 git clone https://github.com/Aayush9029/mcp-server
 cd mcp-server
 uv sync
 ```
+</details>
 
-## Configuration
+## Getting Started
 
-The MCP server connects to the Task Management API at `https://mcpclient.lovedoingthings.com`. The server communicates via stdin/stdout using the MCP protocol.
+### 1. Get an API Key
 
-### Command Line Options
+Contact the API provider to get your `TASK_API_KEY` for the task management service.
 
-```bash
-task-mcp [OPTIONS]
-
-Options:
-  --api-key TEXT                  API key for authentication (can also be set via TASK_API_KEY env var)
-  --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]
-                                  Set the logging level (default: INFO)
-  -h, --help                      Show this message and exit
-```
-
-### Environment Variables
-
-- `TASK_API_KEY`: API key for authentication (alternative to --api-key flag)
-
-### MCP Client Setup
-
-Add this server to your MCP client configuration:
+### 2. Configure Your MCP Client
 
 #### For Claude Desktop
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "task-management": {
+    "task-manager": {
       "command": "uvx",
       "args": ["task-mcp"],
       "env": {
@@ -112,12 +95,12 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-#### For other MCP clients
+#### For Cursor or other MCP clients
 
 ```json
 {
   "mcpServers": {
-    "task-management": {
+    "task-manager": {
       "command": "python",
       "args": ["-m", "task_mcp"],
       "env": {
@@ -128,241 +111,165 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-## Usage
+### 3. Start Using It!
 
-Once configured, the MCP server exposes the following tools to LLMs:
+Once configured, you can ask your AI assistant to:
+- "Create a high-priority task to review the pull request"
+- "Show me all my pending tasks"
+- "Mark task 123 as completed"
+- "Update the project planning task to urgent priority"
+- "Delete all cancelled tasks"
 
-### Available Tools
+## Available Tools
 
-#### `create_task`
-Create a new task with specified details.
+### 📝 `create_task`
+Create a new task with title, description, priority, and notification settings.
 
 **Parameters:**
 - `title` (required): Task title
-- `description`: Task description (optional)
-- `status`: Task status (TODO, IN_PROGRESS, DONE, CANCELLED) - defaults to TODO
-- `priority`: Task priority (LOW, MEDIUM, HIGH, URGENT) - defaults to MEDIUM
-- `notify`: Whether to send notifications (boolean) - defaults to true
+- `description`: Detailed description (optional)
+- `priority`: LOW, MEDIUM, HIGH, or URGENT (default: MEDIUM)
+- `notify`: Enable notifications (default: true)
 
-**Example:**
-```json
-{
-  "title": "Complete project documentation",
-  "description": "Write comprehensive README and API docs",
-  "status": "TODO",
-  "priority": "HIGH",
-  "notify": true
-}
-```
-
-#### `list_tasks`
-List all tasks with optional filtering and pagination.
+### 📋 `list_tasks`
+List all your tasks with optional filtering.
 
 **Parameters:**
-- `status`: Filter by status (TODO, IN_PROGRESS, DONE, CANCELLED)
-- `priority`: Filter by priority (LOW, MEDIUM, HIGH, URGENT)
-- `limit`: Maximum number of tasks to return (1-100, default 20)
-- `offset`: Number of tasks to skip (default 0)
+- `status`: Filter by TODO, IN_PROGRESS, DONE, or CANCELLED
+- `priority`: Filter by LOW, MEDIUM, HIGH, or URGENT
+- `limit`: Max results 1-100 (default: 20)
+- `offset`: Skip tasks for pagination (default: 0)
 
-**Example:**
-```json
-{
-  "status": "TODO",
-  "priority": "HIGH",
-  "limit": 10
-}
-```
-
-#### `get_task`
-Get details of a specific task by ID.
+### 🔍 `get_task`
+Get detailed information about a specific task.
 
 **Parameters:**
-- `task_id` (required): Task ID
+- `task_id` (required): The task's unique identifier
 
-**Example:**
-```json
-{
-  "task_id": "123e4567-e89b-12d3-a456-426614174000"
-}
-```
-
-#### `update_task`
-Update an existing task's properties.
+### ✏️ `update_task`
+Update any property of an existing task.
 
 **Parameters:**
-- `task_id` (required): Task ID
-- `title`: New task title
-- `description`: New task description
-- `status`: New task status (TODO, IN_PROGRESS, DONE, CANCELLED)
-- `priority`: New task priority (LOW, MEDIUM, HIGH, URGENT)
-- `notify`: Whether to send notifications (boolean)
+- `task_id` (required): The task to update
+- `title`: New title
+- `description`: New description
+- `status`: New status
+- `priority`: New priority
+- `notify`: Update notification preference
 
-**Example:**
-```json
-{
-  "task_id": "123e4567-e89b-12d3-a456-426614174000",
-  "title": "Updated title",
-  "status": "IN_PROGRESS",
-  "priority": "HIGH",
-  "notify": false
-}
-```
-
-#### `delete_task`
-Delete a task by ID.
+### 🗑️ `delete_task`
+Permanently delete a task.
 
 **Parameters:**
-- `task_id` (required): Task ID to delete
-
-**Example:**
-```json
-{
-  "task_id": "123e4567-e89b-12d3-a456-426614174000"
-}
-```
-
-### Example Interactions
-
-Here are some example prompts you can use with an LLM that has access to this MCP server:
-
-```
-"Create a high-priority task to review pull requests"
-"Show me all my pending tasks"
-"Mark task 123 as completed"
-"Update the project planning task to urgent priority"
-"Delete all cancelled tasks"
-```
+- `task_id` (required): The task to delete
 
 ## Development
 
-### Setting up the development environment
+### Setting up for development
 
 ```bash
-# Clone the repository
+# Clone the repo
 git clone https://github.com/Aayush9029/mcp-server
 cd mcp-server
 
-# Install dependencies with uv
+# Install dependencies
 uv sync
 
-# Run the development server
+# Run the server
 uv run task-mcp --api-key YOUR_API_KEY
-
-# Or run the module directly
-uv run python -m task_mcp --api-key YOUR_API_KEY
 ```
 
-### Running Tests
+### Running tests
 
 ```bash
 # Run all tests
 uv run pytest
 
-# Run with coverage
+# With coverage
 uv run pytest --cov=. --cov-report=html
 
-# Run specific test file
+# Run specific test
 uv run pytest tests/test_server.py
 ```
 
+### Code quality
 
-### Contributing
+```bash
+# Format code
+uv run black .
+
+# Sort imports
+uv run isort .
+
+# Type checking
+uv run mypy .
+
+# Linting
+uv run ruff check .
+```
+
+## Building Standalone Binaries
+
+You can create platform-specific executables:
+
+```bash
+# Install PyInstaller
+uv pip install pyinstaller
+
+# Build binary
+uv run python build_binary.py
+
+# Run the binary
+./dist/task-mcp-darwin-x86_64 --api-key YOUR_API_KEY
+```
+
+## API Details
+
+### Base URL
+The server connects to: `https://mcpclient.lovedoingthings.com/api`
+
+### Authentication
+All requests require an API key passed via the `X-API-Key` header. Tasks are isolated per API key - you can only see and modify your own tasks.
+
+### Task Structure
+```python
+{
+    "id": "uuid",                  # Unique identifier
+    "title": "string",             # Task title
+    "description": "string",       # Task description
+    "status": "TODO",              # TODO, IN_PROGRESS, DONE, CANCELLED
+    "priority": "MEDIUM",          # LOW, MEDIUM, HIGH, URGENT
+    "notify": true,                # Notification preference
+    "created_by": "api_key_hash",  # Owner identifier
+    "created_at": 1234567890.0,    # Unix timestamp
+    "last_updated_at": 1234567890.0 # Unix timestamp
+}
+```
+
+## Security
+
+- 🔐 **API Key Authentication**: All operations require a valid API key
+- 🔒 **Data Isolation**: Tasks are strictly scoped to their creating API key
+- ✅ **Input Validation**: Comprehensive validation using Pydantic models
+- 🛡️ **Error Handling**: Safe error messages that don't leak sensitive data
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+## Author
+
+Created by [Aayush Pokharel](https://aayush.art)
+- GitHub: [@Aayush9029](https://github.com/Aayush9029)
+- Twitter: [@aayushbuilds](https://x.com/aayushbuilds)
+
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Commit your changes (`git commit -m '✨ Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
-
-### Code Style
-
-This project uses:
-- Black for code formatting
-- isort for import sorting
-- mypy for type checking
-- ruff for linting
-
-Run all checks:
-```bash
-uv run black .
-uv run isort .
-uv run mypy .
-uv run ruff check .
-```
-
-## API Documentation
-
-### Task Model
-
-```python
-class Task:
-    id: str                    # UUID
-    title: str                # Task title
-    description: str          # Task description
-    status: TaskStatus        # TODO, IN_PROGRESS, DONE, CANCELLED
-    priority: TaskPriority    # LOW, MEDIUM, HIGH, URGENT
-    notify: bool              # Notification preference
-    created_by: str           # API key identifier
-    created_at: float         # Creation timestamp (Unix timestamp)
-    last_updated_at: float    # Last update timestamp (Unix timestamp)
-```
-
-### Building Binaries
-
-You can build standalone executables for distribution:
-
-```bash
-# Install PyInstaller
-uv pip install pyinstaller
-
-# Build the binary
-uv run python build_binary.py
-
-# The binary will be created in dist/
-# For macOS: dist/task-mcp-darwin-x86_64
-# For Linux: dist/task-mcp-linux-x86_64
-# For Windows: dist/task-mcp-windows-x86_64.exe
-```
-
-The binary can be run directly:
-```bash
-./dist/task-mcp-darwin-x86_64 --api-key YOUR_API_KEY
-```
-
-### Error Handling
-
-The server implements comprehensive error handling:
-
-- **Invalid input**: Returns error messages for malformed requests
-- **Authentication errors**: Clear messages when API key is missing or invalid
-- **API errors**: Descriptive error messages from the backend API
-- **Network errors**: Handles connection issues gracefully
-
-All errors return descriptive messages to help LLMs provide better user feedback.
-
-## Security
-
-- **API Key Authentication**: All requests require a valid API key
-- **Data Isolation**: Tasks are scoped to individual API keys
-- **Input Validation**: Comprehensive validation using Pydantic
-- **Error Sanitization**: Error messages don't leak sensitive information
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Author
-
-Created by [Aayush Pokharel](https://aayush.art)
-
-- GitHub: [@Aayush9029](https://github.com/Aayush9029)
-- Twitter: [@aayushbuilds](https://x.com/aayushbuilds)
-
-## Acknowledgments
-
-- Built on the [Model Context Protocol](https://modelcontextprotocol.io/)
-- Uses [httpx](https://www.python-httpx.org/) for async HTTP
-- Data validation by [Pydantic](https://pydantic-docs.helpmanual.io/)
 
 ## Support
 
