@@ -126,27 +126,13 @@ def get_headers() -> dict[str, str]:
 
 
 def format_task_display(task: TaskResponse) -> str:
-    """Format a task for display with emojis and readable timestamps."""
-    status_emoji = {
-        "TODO": "📝",
-        "IN_PROGRESS": "🔄", 
-        "DONE": "✅",
-        "CANCELLED": "❌"
-    }.get(task.status, "")
-    
-    priority_emoji = {
-        "LOW": "🟢",
-        "MEDIUM": "🟡",
-        "HIGH": "🔴",
-        "URGENT": "🚨"
-    }.get(task.priority, "")
-    
+    """Format a task for display with readable timestamps."""
     created = datetime.fromtimestamp(task.created_at).strftime("%Y-%m-%d %H:%M")
     updated = datetime.fromtimestamp(task.last_updated_at).strftime("%Y-%m-%d %H:%M")
     
     lines = [
-        f"{status_emoji} **{task.title}** {priority_emoji}",
-        f"ID: `{task.id}`",
+        f"**{task.title}**",
+        f"ID: {task.id}",
         f"Status: {task.status} | Priority: {task.priority}"
     ]
     
@@ -154,7 +140,7 @@ def format_task_display(task: TaskResponse) -> str:
         lines.append(f"Description: {task.description}")
     
     if task.notify:
-        lines.append("🔔 Notifications enabled")
+        lines.append("Notifications enabled")
     
     lines.extend([
         f"Created: {created}",
@@ -197,7 +183,7 @@ def create_task(
         response.raise_for_status()
         
         task = TaskResponse(**response.json())
-        return f"✅ Created task '{task.title}' with ID: {task.id}\n\n{format_task_display(task)}"
+        return f"Created task '{task.title}' with ID: {task.id}\n\n{format_task_display(task)}"
 
 
 @mcp.tool(
@@ -234,33 +220,20 @@ def list_tasks(
         task_list = TaskListResponse(**response.json())
         
         if not task_list.tasks:
-            return "📭 No tasks found."
+            return "No tasks found."
         
-        result = [f"📋 Found {task_list.total} task(s):"]
+        result = [f"Found {task_list.total} task(s):"]
         result.append("=" * 50)
         
         for i, task in enumerate(task_list.tasks, 1):
-            status_emoji = {
-                "TODO": "📝",
-                "IN_PROGRESS": "🔄",
-                "DONE": "✅", 
-                "CANCELLED": "❌"
-            }.get(task.status, "")
-            
-            priority_emoji = {
-                "LOW": "🟢",
-                "MEDIUM": "🟡",
-                "HIGH": "🔴",
-                "URGENT": "🚨"
-            }.get(task.priority, "")
-            
-            result.append(f"\n{i}. {status_emoji} [{task.id}] **{task.title}** {priority_emoji}")
+            result.append(f"\n{i}. [{task.id}] **{task.title}**")
+            result.append(f"   Status: {task.status} | Priority: {task.priority}")
             
             if task.description:
                 result.append(f"   {task.description}")
             
             if task.notify:
-                result.append("   🔔 Notifications enabled")
+                result.append("   Notifications enabled")
         
         return "\n".join(result)
 
@@ -327,7 +300,7 @@ def update_task(
         response.raise_for_status()
         
         task = TaskResponse(**response.json())
-        return f"✅ Updated task '{task.title}' (ID: {task.id})\n\n{format_task_display(task)}"
+        return f"Updated task '{task.title}' (ID: {task.id})\n\n{format_task_display(task)}"
 
 
 @mcp.tool(
@@ -349,7 +322,7 @@ def delete_task(
         )
         response.raise_for_status()
         
-        return f"🗑️ Successfully deleted task with ID: {task_id}"
+        return f"Successfully deleted task with ID: {task_id}"
 
 
 if __name__ == "__main__":

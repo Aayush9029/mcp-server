@@ -265,24 +265,6 @@ uv run pytest --cov=. --cov-report=html
 uv run pytest tests/test_server.py
 ```
 
-### Project Structure
-
-```
-mcp-server/
-├── task_mcp/          # Main package directory
-│   ├── __init__.py    # Package initialization
-│   ├── __main__.py    # CLI entry point
-│   ├── server.py      # MCP server implementation (stdio transport)
-│   └── models.py      # Pydantic models for data validation
-├── tests/             # Test suite
-│   ├── __init__.py
-│   └── test_basic.py
-├── pyproject.toml     # Project configuration
-├── README.md          # Project documentation
-├── LICENSE            # MIT License
-├── __main__.py        # Package entry point
-└── build_binary.py    # Script for building standalone binaries
-```
 
 ### Contributing
 
