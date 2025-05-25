@@ -3,7 +3,7 @@
 
 import sys
 
-from task_mcp import main
+from task_mcp.__main__ import main
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

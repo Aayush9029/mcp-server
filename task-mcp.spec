@@ -20,7 +20,7 @@ binary_name = f'task-mcp-{platform}-{arch}'
 is_windows = sys.platform.startswith('win')
 
 a = Analysis(
-    ['task_mcp/server.py'],
+    ['__main__.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -39,14 +39,13 @@ a = Analysis(
         'pydantic',
         'pydantic.main',
         'pydantic.fields',
-        'uvicorn',
-        'uvicorn.config',
-        'uvicorn.main',
-        'starlette',
-        'starlette.applications',
-        'starlette.routing',
-        'starlette.responses',
+        'click',
+        'click.core',
+        'click.formatting',
+        'click.parser',
+        'click.types',
         'task_mcp',
+        'task_mcp.__main__',
         'task_mcp.models',
         'task_mcp.server',
         'asyncio',

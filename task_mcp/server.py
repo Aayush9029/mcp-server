@@ -1,327 +1,385 @@
-"""MCP Server for Task Management API."""
+"""Task Management MCP Server - stdio transport implementation."""
 
-import asyncio
-import json
+import logging
 import os
-import sys
-from typing import Any
+from typing import Any, Optional
 
 import httpx
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+import mcp.server.stdio
+import mcp.types as types
+from mcp.server import NotificationOptions, Server
+from mcp.server.models import InitializationOptions
 
-from task_mcp.models import (TaskCreate, TaskListResponse, TaskResponse,
-                             TaskUpdate)
+from .models import TaskCreate, TaskListResponse, TaskResponse, TaskUpdate
+
+logger = logging.getLogger(__name__)
+
+API_BASE_URL = "https://mcpclient.lovedoingthings.com"
 
 
-class TaskManagementMCP:
-    """MCP Server wrapper for Task Management API."""
+class TaskMCPServer:
+    """MCP Server for task management via API wrapper."""
 
     def __init__(self):
-        self.server = Server("task-management-mcp")
-        self.base_url = "https://mcpclient.lovedoingthings.com"
-        self.api_key = os.getenv("TASK_API_KEY", "")
+        """Initialize the MCP server."""
+        self.server = Server("task-mcp")
+        self.api_key = os.getenv("TASK_API_KEY")
+        self._setup_handlers()
 
-        # Store tools
-        self.tools = [
-            self._create_task_tool(),
-            self._list_tasks_tool(),
-            self._get_task_tool(),
-            self._update_task_tool(),
-            self._delete_task_tool(),
-        ]
-
-        # Register handlers
-        self._register_handlers()
-
-    def _create_task_tool(self) -> Tool:
-        """Define the create task tool."""
-        return Tool(
-            name="create_task",
-            description="Create a new task",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "Task title (required)"},
-                    "description": {
-                        "type": "string",
-                        "description": "Task description",
-                        "default": "",
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["TODO", "IN_PROGRESS", "DONE", "CANCELLED"],
-                        "description": "Task status",
-                        "default": "TODO",
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["LOW", "MEDIUM", "HIGH", "URGENT"],
-                        "description": "Task priority",
-                        "default": "MEDIUM",
-                    },
-                    "notify": {
-                        "type": "boolean",
-                        "description": "Whether to send notifications",
-                        "default": False,
-                    },
-                },
-                "required": ["title"],
-            },
-        )
-
-    def _list_tasks_tool(self) -> Tool:
-        """Define the list tasks tool."""
-        return Tool(
-            name="list_tasks",
-            description="List all tasks associated with the API key",
-            inputSchema={"type": "object", "properties": {}},
-        )
-
-    def _get_task_tool(self) -> Tool:
-        """Define the get task tool."""
-        return Tool(
-            name="get_task",
-            description="Get a specific task by ID",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "The unique identifier of the task",
-                    }
-                },
-                "required": ["task_id"],
-            },
-        )
-
-    def _update_task_tool(self) -> Tool:
-        """Define the update task tool."""
-        return Tool(
-            name="update_task",
-            description="Update an existing task",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "The unique identifier of the task",
-                    },
-                    "title": {"type": "string", "description": "New task title"},
-                    "description": {
-                        "type": "string",
-                        "description": "New task description",
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["TODO", "IN_PROGRESS", "DONE", "CANCELLED"],
-                        "description": "New task status",
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["LOW", "MEDIUM", "HIGH", "URGENT"],
-                        "description": "New task priority",
-                    },
-                    "notify": {
-                        "type": "boolean",
-                        "description": "Whether to send notifications",
-                    },
-                },
-                "required": ["task_id"],
-            },
-        )
-
-    def _delete_task_tool(self) -> Tool:
-        """Define the delete task tool."""
-        return Tool(
-            name="delete_task",
-            description="Delete a task by ID",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "The unique identifier of the task",
-                    }
-                },
-                "required": ["task_id"],
-            },
-        )
-
-    def _register_handlers(self):
-        """Register all handlers with the server."""
-
+    def _setup_handlers(self):
+        """Set up all MCP protocol handlers."""
+        
         @self.server.list_tools()
-        async def handle_list_tools() -> list[Tool]:
-            return self.tools
+        async def handle_list_tools() -> list[types.Tool]:
+            """List all available tools."""
+            return [
+                types.Tool(
+                    name="create_task",
+                    description="Create a new task",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "description": "Task title"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Task description"
+                            },
+                            "priority": {
+                                "type": "string",
+                                "enum": ["LOW", "MEDIUM", "HIGH", "URGENT"],
+                                "description": "Task priority",
+                                "default": "MEDIUM"
+                            },
+                            "notify": {
+                                "type": "boolean",
+                                "description": "Whether to send notifications",
+                                "default": true
+                            }
+                        },
+                        "required": ["title"]
+                    }
+                ),
+                types.Tool(
+                    name="list_tasks",
+                    description="List all tasks with optional filtering",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "status": {
+                                "type": "string",
+                                "enum": ["TODO", "IN_PROGRESS", "DONE", "CANCELLED"],
+                                "description": "Filter by status"
+                            },
+                            "priority": {
+                                "type": "string",
+                                "enum": ["LOW", "MEDIUM", "HIGH", "URGENT"],
+                                "description": "Filter by priority"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of tasks to return",
+                                "minimum": 1,
+                                "maximum": 100,
+                                "default": 20
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Number of tasks to skip",
+                                "minimum": 0,
+                                "default": 0
+                            }
+                        }
+                    }
+                ),
+                types.Tool(
+                    name="get_task",
+                    description="Get a specific task by ID",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "Task ID"
+                            }
+                        },
+                        "required": ["task_id"]
+                    }
+                ),
+                types.Tool(
+                    name="update_task",
+                    description="Update an existing task",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "Task ID"
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "New task title"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "New task description"
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["TODO", "IN_PROGRESS", "DONE", "CANCELLED"],
+                                "description": "New task status"
+                            },
+                            "priority": {
+                                "type": "string",
+                                "enum": ["LOW", "MEDIUM", "HIGH", "URGENT"],
+                                "description": "New task priority"
+                            },
+                            "notify": {
+                                "type": "boolean",
+                                "description": "Whether to send notifications"
+                            }
+                        },
+                        "required": ["task_id"]
+                    }
+                ),
+                types.Tool(
+                    name="delete_task",
+                    description="Delete a task",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "Task ID to delete"
+                            }
+                        },
+                        "required": ["task_id"]
+                    }
+                )
+            ]
 
         @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
-            return await self._handle_tool_call(name, arguments)
-
-    async def _handle_tool_call(
-        self, name: str, arguments: dict[str, Any]
-    ) -> list[TextContent]:
-        """Handle tool calls."""
-        if not self.api_key:
-            return [
-                TextContent(
-                    type="text",
-                    text="Error: No API key configured. Please provide the API key in your MCP client configuration or download the MCP Client app from the Apple App Store to generate one.",
-                )
-            ]
-
-        if not self.api_key.startswith("ldtmcp-"):
-            return [
-                TextContent(
-                    type="text",
-                    text="Error: Invalid API key format. API key must start with 'ldtmcp-' prefix.",
-                )
-            ]
-
-        headers = {"X-API-Key": self.api_key}
-
-        async with httpx.AsyncClient() as client:
+        async def handle_call_tool(
+            name: str, arguments: dict[str, Any]
+        ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+            """Handle tool calls."""
+            
+            # Get headers for API calls
+            headers = self._get_headers()
+            
             try:
                 if name == "create_task":
-                    task_data = TaskCreate(**arguments)
-                    response = await client.post(
-                        f"{self.base_url}/api/tasks/",
-                        headers=headers,
-                        json=task_data.model_dump(),
-                    )
-                    response.raise_for_status()
-                    task = TaskResponse(**response.json())
-                    return [
-                        TextContent(
-                            type="text",
-                            text=f"Task created successfully:\n{json.dumps(task.model_dump(), indent=2)}",
-                        )
-                    ]
-
+                    return await self._create_task(arguments, headers)
                 elif name == "list_tasks":
-                    response = await client.get(
-                        f"{self.base_url}/api/tasks/", headers=headers
-                    )
-                    response.raise_for_status()
-                    task_list = TaskListResponse(**response.json())
-                    return [
-                        TextContent(
-                            type="text",
-                            text=f"Found {task_list.total} tasks:\n{json.dumps([task.model_dump() for task in task_list.tasks], indent=2)}",
-                        )
-                    ]
-
+                    return await self._list_tasks(arguments, headers)
                 elif name == "get_task":
-                    task_id = arguments["task_id"]
-                    response = await client.get(
-                        f"{self.base_url}/api/tasks/{task_id}", headers=headers
-                    )
-                    response.raise_for_status()
-                    task = TaskResponse(**response.json())
-                    return [
-                        TextContent(
-                            type="text",
-                            text=f"Task details:\n{json.dumps(task.model_dump(), indent=2)}",
-                        )
-                    ]
-
+                    return await self._get_task(arguments, headers)
                 elif name == "update_task":
-                    task_id = arguments.pop("task_id")
-                    update_data = TaskUpdate(**arguments)
-                    response = await client.put(
-                        f"{self.base_url}/api/tasks/{task_id}",
-                        headers=headers,
-                        json=update_data.model_dump(exclude_none=True),
-                    )
-                    response.raise_for_status()
-                    task = TaskResponse(**response.json())
-                    return [
-                        TextContent(
-                            type="text",
-                            text=f"Task updated successfully:\n{json.dumps(task.model_dump(), indent=2)}",
-                        )
-                    ]
-
+                    return await self._update_task(arguments, headers)
                 elif name == "delete_task":
-                    task_id = arguments["task_id"]
-                    response = await client.delete(
-                        f"{self.base_url}/api/tasks/{task_id}", headers=headers
-                    )
-                    response.raise_for_status()
-                    return [
-                        TextContent(
-                            type="text", text=f"Task {task_id} deleted successfully"
-                        )
-                    ]
-
+                    return await self._delete_task(arguments, headers)
                 else:
-                    return [TextContent(type="text", text=f"Unknown tool: {name}")]
-
-            except httpx.HTTPStatusError as e:
-                error_detail = ""
-                try:
-                    error_detail = e.response.json()
-                except (ValueError, TypeError, AttributeError):
-                    error_detail = e.response.text
-
-                if e.response.status_code == 401:
-                    return [
-                        TextContent(
-                            type="text",
-                            text="Authentication error: Invalid or missing API key. Please download the MCP Client app from the Apple App Store to generate a valid API key.",
-                        )
-                    ]
-                elif e.response.status_code == 404:
-                    return [
-                        TextContent(
-                            type="text",
-                            text="Task not found or does not belong to your API key",
-                        )
-                    ]
-                else:
-                    return [
-                        TextContent(
-                            type="text",
-                            text=f"HTTP Error {e.response.status_code}: {error_detail}",
-                        )
-                    ]
+                    raise ValueError(f"Unknown tool: {name}")
             except Exception as e:
-                return [TextContent(type="text", text=f"Error: {str(e)}")]
+                logger.error(f"Error in tool {name}: {str(e)}")
+                return [types.TextContent(
+                    type="text",
+                    text=f"Error: {str(e)}"
+                )]
+
+    def _get_headers(self) -> dict[str, str]:
+        """Get headers for API requests."""
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    async def _create_task(
+        self, arguments: dict[str, Any], headers: dict[str, str]
+    ) -> list[types.TextContent]:
+        """Create a new task."""
+        task_data = TaskCreate(**arguments)
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{API_BASE_URL}/tasks",
+                json=task_data.model_dump(exclude_none=True),
+                headers=headers
+            )
+            response.raise_for_status()
+            
+            task = TaskResponse(**response.json())
+            return [types.TextContent(
+                type="text",
+                text=f"Created task '{task.title}' with ID: {task.id}"
+            )]
+
+    async def _list_tasks(
+        self, arguments: dict[str, Any], headers: dict[str, str]
+    ) -> list[types.TextContent]:
+        """List tasks with optional filtering."""
+        params = {k: v for k, v in arguments.items() if v is not None}
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_BASE_URL}/tasks",
+                params=params,
+                headers=headers
+            )
+            response.raise_for_status()
+            
+            task_list = TaskListResponse(**response.json())
+            
+            if not task_list.tasks:
+                return [types.TextContent(
+                    type="text",
+                    text="No tasks found."
+                )]
+            
+            # Format task list
+            lines = [f"Found {task_list.total} task(s):"]
+            for task in task_list.tasks:
+                status_emoji = {
+                    "TODO": "📝",
+                    "IN_PROGRESS": "🔄",
+                    "DONE": "✅",
+                    "CANCELLED": "❌"
+                }.get(task.status, "")
+                
+                priority_emoji = {
+                    "LOW": "🟢",
+                    "MEDIUM": "🟡",
+                    "HIGH": "🔴",
+                    "URGENT": "🚨"
+                }.get(task.priority, "")
+                
+                lines.append(
+                    f"\n{status_emoji} [{task.id}] {task.title} {priority_emoji}"
+                )
+                if task.description:
+                    lines.append(f"   {task.description}")
+                if task.notify:
+                    lines.append(f"   🔔 Notifications enabled")
+            
+            return [types.TextContent(
+                type="text",
+                text="\n".join(lines)
+            )]
+
+    async def _get_task(
+        self, arguments: dict[str, Any], headers: dict[str, str]
+    ) -> list[types.TextContent]:
+        """Get a specific task by ID."""
+        task_id = arguments["task_id"]
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_BASE_URL}/tasks/{task_id}",
+                headers=headers
+            )
+            response.raise_for_status()
+            
+            task = TaskResponse(**response.json())
+            
+            status_emoji = {
+                "TODO": "📝",
+                "IN_PROGRESS": "🔄",
+                "DONE": "✅",
+                "CANCELLED": "❌"
+            }.get(task.status, "")
+            
+            priority_emoji = {
+                "LOW": "🟢",
+                "MEDIUM": "🟡",
+                "HIGH": "🔴",
+                "URGENT": "🚨"
+            }.get(task.priority, "")
+            
+            lines = [
+                f"{status_emoji} Task: {task.title} {priority_emoji}",
+                f"ID: {task.id}",
+                f"Status: {task.status}",
+                f"Priority: {task.priority}"
+            ]
+            
+            if task.description:
+                lines.append(f"Description: {task.description}")
+            if task.notify:
+                lines.append(f"Notifications: Enabled 🔔")
+            
+            # Convert timestamps to readable format
+            from datetime import datetime
+            created = datetime.fromtimestamp(task.created_at).strftime("%Y-%m-%d %H:%M:%S")
+            updated = datetime.fromtimestamp(task.last_updated_at).strftime("%Y-%m-%d %H:%M:%S")
+            
+            lines.extend([
+                f"Created: {created}",
+                f"Updated: {updated}"
+            ])
+            
+            return [types.TextContent(
+                type="text",
+                text="\n".join(lines)
+            )]
+
+    async def _update_task(
+        self, arguments: dict[str, Any], headers: dict[str, str]
+    ) -> list[types.TextContent]:
+        """Update an existing task."""
+        task_id = arguments.pop("task_id")
+        update_data = TaskUpdate(**arguments)
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{API_BASE_URL}/tasks/{task_id}",
+                json=update_data.model_dump(exclude_none=True),
+                headers=headers
+            )
+            response.raise_for_status()
+            
+            task = TaskResponse(**response.json())
+            return [types.TextContent(
+                type="text",
+                text=f"Updated task '{task.title}' (ID: {task.id})"
+            )]
+
+    async def _delete_task(
+        self, arguments: dict[str, Any], headers: dict[str, str]
+    ) -> list[types.TextContent]:
+        """Delete a task."""
+        task_id = arguments["task_id"]
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(
+                f"{API_BASE_URL}/tasks/{task_id}",
+                headers=headers
+            )
+            response.raise_for_status()
+            
+            return [types.TextContent(
+                type="text",
+                text=f"Successfully deleted task with ID: {task_id}"
+            )]
 
     async def run(self):
-        """Run the MCP server."""
-        async with stdio_server() as (read_stream, write_stream):
-            await self.server.run(read_stream, write_stream, None)
+        """Run the MCP server using stdio transport."""
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await self.server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="task-mcp",
+                    server_version="1.0.11",
+                    capabilities=self.server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
+                ),
+            )
 
 
-def main():
-    """Main entry point."""
-    import sys
-
-    # Simple argument handling
-    if len(sys.argv) > 1 and sys.argv[1] in ["--help", "-h"]:
-        print("Task Management MCP Server")
-        print("\nUsage: task-mcp [options]")
-        print("\nOptions:")
-        print("  --help, -h    Show this help message")
-        print("\nEnvironment Variables:")
-        print("  TASK_API_KEY  API key for the task management service")
-        print("\nThis server implements the Model Context Protocol (MCP)")
-        print("and provides tools for managing tasks via API.")
-        return 0
-
-    # Run the server
-    asyncio.run(run_server())
-    return 0
-
-
-async def run_server():
-    """Run the MCP server."""
-    mcp = TaskManagementMCP()
-    await mcp.run()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+def create_server() -> TaskMCPServer:
+    """Create and return a TaskMCPServer instance."""
+    return TaskMCPServer()
