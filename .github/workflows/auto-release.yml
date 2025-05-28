@@ -1,0 +1,263 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - '.github/**'
+      - '!.github/workflows/auto-release.yml'
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: false
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump_version.outputs.new_version }}
+      tag: ${{ steps.bump_version.outputs.tag }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.PAT || secrets.GITHUB_TOKEN }}
+    
+    - name: Get current version
+      id: current_version
+      run: |
+        VERSION=$(grep -E '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+    
+    - name: Bump version
+      id: bump_version
+      run: |
+        # Parse current version
+        CURRENT_VERSION="${{ steps.current_version.outputs.version }}"
+        IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+        
+        # Determine bump type
+        BUMP_TYPE="${{ github.event.inputs.version_bump || 'patch' }}"
+        
+        # Increment version
+        if [[ "$BUMP_TYPE" == "major" ]]; then
+          MAJOR=$((MAJOR + 1))
+          MINOR=0
+          PATCH=0
+        elif [[ "$BUMP_TYPE" == "minor" ]]; then
+          MINOR=$((MINOR + 1))
+          PATCH=0
+        else
+          PATCH=$((PATCH + 1))
+        fi
+        
+        NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "Bumping version from $CURRENT_VERSION to $NEW_VERSION"
+    
+    - name: Update version in pyproject.toml
+      run: |
+        sed -i 's/^version = ".*"/version = "${{ steps.bump_version.outputs.new_version }}"/' pyproject.toml
+        
+    - name: Commit version bump
+      run: |
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git add pyproject.toml
+        git commit -m "chore: bump version to ${{ steps.bump_version.outputs.new_version }} [skip ci]"
+        git push
+    
+    - name: Create and push tag
+      run: |
+        git tag -a "${{ steps.bump_version.outputs.tag }}" -m "Release ${{ steps.bump_version.outputs.tag }}"
+        git push origin "${{ steps.bump_version.outputs.tag }}"
+  
+  build-binaries:
+    needs: prepare-release
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x86_64
+          - os: macos-latest
+            platform: darwin
+            arch: x86_64
+          - os: macos-latest
+            platform: darwin
+            arch: arm64
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.7.8"
+          enable-cache: true
+      
+      - name: Set up Python
+        run: uv python install 3.11
+      
+      - name: Install dependencies
+        run: |
+          uv sync --all-extras
+          uv pip install pyinstaller
+      
+      - name: Build binary
+        run: |
+          # Set architecture for macOS
+          if [[ "${{ matrix.platform }}" == "darwin" && "${{ matrix.arch }}" == "arm64" ]]; then
+            export ARCHFLAGS="-arch arm64"
+            export _PYTHON_HOST_PLATFORM="macosx-11.0-arm64"
+          fi
+          
+          # Set target architecture
+          export TARGET_ARCH="${{ matrix.arch }}"
+          
+          # Build the binary using our build script
+          uv run python build_binary.py
+        shell: bash
+      
+      - name: Test binary
+        run: |
+          ./dist/task-mcp-${{ matrix.platform }}-${{ matrix.arch }} --help || true
+        shell: bash
+      
+      - name: Compress binary
+        run: |
+          cd dist
+          tar -czf task-mcp-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz task-mcp-${{ matrix.platform }}-${{ matrix.arch }}
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  publish-pypi:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.prepare-release.outputs.tag }}
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        version: "0.7.8"
+        enable-cache: true
+    
+    - name: Set up Python
+      run: uv python install 3.11
+    
+    - name: Build package
+      run: |
+        uv build
+    
+    - name: Check distribution
+      run: |
+        uv run --with twine twine check dist/*
+    
+    - name: Publish to PyPI
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      run: |
+        uv run --with twine twine upload dist/*
+    
+    - name: Verify installation
+      run: |
+        sleep 60  # Give PyPI time to update
+        uv venv verify-env
+        uv pip install --python verify-env task-mcp --no-cache-dir
+        # Test the installed command
+        TASK_API_KEY=test-key uv run --python verify-env python -c "import task_mcp_server; print('✅ Package imports work')"
+        # Test the CLI
+        TASK_API_KEY=test-key uv run --python verify-env task-mcp --help
+
+  create-release:
+    needs: [prepare-release, build-binaries, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -name "*.tar.gz" | while read file; do
+            cp "$file" release-assets/
+          done
+          ls -la release-assets/
+      
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get commits since last tag
+          PREV_TAG=$(git describe --tags --abbrev=0 ${{ needs.prepare-release.outputs.tag }}^ 2>/dev/null || echo "")
+          if [[ -z "$PREV_TAG" ]]; then
+            COMMITS=$(git log --pretty=format:"- %s" --no-merges)
+          else
+            COMMITS=$(git log ${PREV_TAG}..${{ needs.prepare-release.outputs.tag }} --pretty=format:"- %s" --no-merges)
+          fi
+          
+          # Create changelog
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "## What's Changed" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "$COMMITS" | grep -v "skip ci" | head -20 >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "## Installation" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "### PyPI" >> $GITHUB_OUTPUT
+          echo '```bash' >> $GITHUB_OUTPUT
+          echo "pip install task-mcp==${{ needs.prepare-release.outputs.version }}" >> $GITHUB_OUTPUT
+          echo '```' >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "### Binary Downloads" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "Pre-built binaries are available below:" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "**macOS:**" >> $GITHUB_OUTPUT
+          echo "- Intel: \`task-mcp-darwin-x86_64.tar.gz\`" >> $GITHUB_OUTPUT
+          echo "- Apple Silicon: \`task-mcp-darwin-arm64.tar.gz\`" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "**Linux:**" >> $GITHUB_OUTPUT
+          echo "- x86_64: \`task-mcp-linux-x86_64.tar.gz\`" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.prepare-release.outputs.tag }}
+          name: "Release ${{ needs.prepare-release.outputs.tag }}"
+          body: ${{ steps.changelog.outputs.changelog }}
+          files: |
+            release-assets/*
+          draft: false
+          prerelease: false 
