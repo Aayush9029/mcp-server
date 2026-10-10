@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: mcp-client-server
+    runtime: python
+    plan: starter
+    buildCommand: uv sync --frozen --no-dev
+    startCommand: uv run --frozen --no-dev mcp-client-server
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.3
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: mcp-client-store
+          property: connectionString
+      - key: WEB_CONCURRENCY
+        value: 2
+      - key: APP_NAME
+        value: MCP Client
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: SUPPORT_EMAIL
+        sync: false
+      - key: APP_STORE_URL
+        sync: false
+      - key: APNS_KEY_P8
+        sync: false
+      - key: APNS_KEY_ID
+        sync: false
+      - key: APNS_TEAM_ID
+        sync: false
+      - key: APNS_BUNDLE_ID
+        sync: false
+
+  - type: keyvalue
+    name: mcp-client-store
+    plan: starter
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+    ipAllowList: []
