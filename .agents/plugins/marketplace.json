@@ -1,0 +1,20 @@
+{
+  "name": "relaydeck",
+  "interface": {
+    "displayName": "Relaydeck"
+  },
+  "plugins": [
+    {
+      "name": "relaydeck",
+      "source": {
+        "source": "local",
+        "path": "./plugins/relaydeck"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

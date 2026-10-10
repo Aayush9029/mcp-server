@@ -48,19 +48,19 @@ Open the iOS app and create a key for each agent.
 
 #### For Claude Code
 
-```bash
-claude mcp add --transport http tasks https://relaydeck.onrender.com/mcp \
-  --header "Authorization: Bearer YOUR_API_KEY"
 ```
+/plugin marketplace add Aayush9029/mcp-server
+/plugin install relaydeck@relaydeck
+```
+
+Claude Code asks for your API key one time and keeps it in the Keychain.
 
 #### For Codex
 
-Add this to `~/.codex/config.toml`, then set `TASKS_API_KEY` in your shell:
-
-```toml
-[mcp_servers.tasks]
-url = "https://relaydeck.onrender.com/mcp"
-bearer_token_env_var = "TASKS_API_KEY"
+```bash
+export TASKS_API_KEY=YOUR_API_KEY
+codex plugin marketplace add Aayush9029/mcp-server
+codex plugin add relaydeck@relaydeck
 ```
 
 #### For Cursor or Other MCP Clients

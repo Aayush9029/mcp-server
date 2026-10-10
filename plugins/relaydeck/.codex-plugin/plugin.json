@@ -1,0 +1,29 @@
+{
+  "name": "relaydeck",
+  "version": "1.0.0",
+  "description": "Send tasks, progress, and push notifications from your agent to the Relaydeck app on iPhone, iPad, and Apple Watch.",
+  "author": {
+    "name": "Aayush9029",
+    "url": "https://github.com/Aayush9029"
+  },
+  "homepage": "https://relaydeck.onrender.com",
+  "repository": "https://github.com/Aayush9029/mcp-server",
+  "license": "MIT",
+  "keywords": ["tasks", "notifications", "ios", "apple-watch"],
+  "mcpServers": {
+    "tasks": {
+      "type": "http",
+      "url": "https://relaydeck.onrender.com/mcp",
+      "bearer_token_env_var": "TASKS_API_KEY"
+    }
+  },
+  "interface": {
+    "displayName": "Relaydeck",
+    "shortDescription": "Agent tasks on your iPhone",
+    "longDescription": "Relaydeck shows the tasks of your agent on iPhone, iPad, and Apple Watch. The agent creates tasks, reports progress, and sends a push notification when you must act. Each API key sees only its own tasks.",
+    "developerName": "Aayush9029",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://relaydeck.onrender.com"
+  }
+}

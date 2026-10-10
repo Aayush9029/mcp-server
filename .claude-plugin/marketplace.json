@@ -1,0 +1,14 @@
+{
+  "name": "relaydeck",
+  "description": "Relaydeck sends tasks and notifications from your AI agents to iPhone, iPad, and Apple Watch.",
+  "owner": {
+    "name": "Aayush9029",
+    "url": "https://github.com/Aayush9029"
+  },
+  "plugins": [
+    {
+      "name": "relaydeck",
+      "source": "./plugins/relaydeck"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Aayush9029/relaydeck",
+  "title": "Relaydeck",
+  "description": "Send your AI agent's tasks, progress, and push notifications to iPhone, iPad, and Apple Watch.",
+  "version": "0.1.0",
+  "websiteUrl": "https://relaydeck.onrender.com",
+  "repository": {
+    "url": "https://github.com/Aayush9029/mcp-server",
+    "source": "github",
+    "id": "989686746"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://relaydeck.onrender.com/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "API key from the Relaydeck iOS app, sent as a bearer token.",
+          "value": "Bearer {api_key}",
+          "isRequired": true,
+          "isSecret": true,
+          "variables": {
+            "api_key": {
+              "description": "API key that you create in the Relaydeck iOS app. The key starts with mck_.",
+              "isRequired": true,
+              "isSecret": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
