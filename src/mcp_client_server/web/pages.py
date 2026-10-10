@@ -36,7 +36,8 @@ Your devices show each change, send a notification, and show a Live Activity for
 </ol>
 
 <h2>Connect an agent</h2>
-<p>Replace <code>{_KEY}</code> with a key from the app. The app keeps the key on your device, and you can copy it again from the Keys screen.</p>
+<p>Replace <code>{_KEY}</code> with a key from the app. The app keeps the key on your device,
+and you can copy it again from the Keys screen.</p>
 
 <h3>Claude Code</h3>
 {code(f'claude mcp add --transport http tasks {url} --header "Authorization: Bearer {_KEY}"')}
