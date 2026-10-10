@@ -89,44 +89,19 @@ Once configured, your AI assistant can:
 
 ## Available Tools
 
-### `create_task`
-Create new tasks with title, description, priority, and notification settings.
+<details>
+<summary>Six tools for your agents</summary>
 
-### `list_tasks`
-View all tasks with optional filtering by status or priority.
+| Tool | What it does |
+|------|--------------|
+| `create_task` | Create a task with title, description, priority, and notification settings |
+| `list_tasks` | List tasks, with optional filters for status and priority |
+| `get_task` | Get the details of one task |
+| `update_task` | Change status, priority, progress, and the live status note |
+| `delete_task` | Delete a task |
+| `notify_user` | Send a push notification to your devices |
 
-### `get_task`
-Get detailed information about any specific task.
-
-### `update_task`
-Modify task properties including status, priority, progress, and a live status note.
-
-### `delete_task`
-Remove completed or cancelled tasks.
-
-### `notify_user`
-Send a push notification to your devices when you must act or must know now.
-
-## Technical Details
-
-- **Protocol**: MCP `2026-07-28` over Streamable HTTP, stateless. Earlier revisions also work.
-- **Authentication**: API key in the `Authorization: Bearer` header
-- **Supported Priorities**: `low`, `medium`, `high`, `urgent`
-- **Supported Statuses**: `todo`, `in_progress`, `done`, `cancelled`
-- **REST API and push contract**: [docs/api.md](docs/api.md)
-- **Hosted server**: [relaydeck.onrender.com](https://relaydeck.onrender.com)
-
-### Run Your Own
-
-One Python service and one Redis-compatible store. Deploy [`render.yaml`](render.yaml) to Render, or run it locally:
-
-```bash
-uv sync
-valkey-server --save "" &
-uv run mcp-client-server
-```
-
-Configuration is environment variables only. See [`.env.example`](.env.example).
+</details>
 
 ## Security & Privacy
 
@@ -135,16 +110,6 @@ Configuration is environment variables only. See [`.env.example`](.env.example).
 - **Hashed Credentials**: The server stores only a hash of each key
 - **No Account Details**: No email, no password, no tracking
 - **Real-time Updates**: Changes sync instantly to your devices
-
-## Need Help?
-
-If your AI assistant isn't connecting:
-
-1. Check that your API key is correctly formatted
-2. Verify the configuration file location
-3. Restart your MCP client after configuration changes
-
-For issues or feature requests, visit the [GitHub Issues](https://github.com/Aayush9029/mcp-server/issues).
 
 ---
 
