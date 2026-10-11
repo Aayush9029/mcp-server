@@ -18,8 +18,13 @@ PLUGIN_NAME="tasks"
 PLUGIN_ID="relaydeck@relaydeck"
 PLUGIN_MARKETPLACE="relaydeck"
 PLUGIN_REPO="Aayush9029/mcp-server"
+# The first Claude Code version that saves a plugin option from stdin (claude plugin configure --values-stdin).
+CLAUDE_MIN_VERSION="2.1.285"
 
 AGENT_IDS="claude codex cursor gemini opencode zed copilot antigravity kiro droid cline amp"
+
+# The sed program that takes each Relaydeck API key out of a text.
+KEY_PATTERN='s/mck_[A-Za-z0-9_-]*/relaydeck-key-removed/g'
 
 # The hook script of the Relaydeck plugin has this name in the folder of an agent that has no plugin.
 HOOK_FILE="relaydeck-inbox.sh"
@@ -488,13 +493,54 @@ backup_note() {
     fi
 }
 
-# The backup that an uninstall makes still holds the API key, so it goes after a good removal.
+# The backup that an uninstall makes holds the entry that the uninstall removes, so it goes after
+# a good removal.
 drop_backup() {
     if [ -n "$BACKUP" ]; then
         rm -f "$BACKUP"
         BACKUP=''
     fi
 }
+
+# A backup keeps the other configuration of the person. It must not keep an API key, and it has
+# no use when it holds only what the file holds now. tidy_backups FILE takes each Relaydeck key
+# out of each backup of FILE. Then it removes a backup that is the same as FILE without its keys:
+# the backup of a change of the key, and after an uninstall the backup of the state that is there
+# again.
+tidy_backups() {
+    tb_file=$(resolve_link "$1")
+    set +f
+    for tb_backup in "$tb_file".relaydeck-backup-*; do
+        set -f
+        [ -f "$tb_backup" ] || continue
+        if grep -q 'mck_' "$tb_backup" 2>/dev/null && ! remove_keys "$tb_backup"; then
+            rm -f "$tb_backup"
+        elif [ -f "$tb_file" ] && sed "$KEY_PATTERN" "$tb_file" 2>/dev/null | cmp -s - "$tb_backup"; then
+            rm -f "$tb_backup"
+        fi
+    done
+    set -f
+}
+
+remove_keys() {
+    rk_clean=$(mktemp "$(dirname "$1")/.relaydeck-install.XXXXXX") || return 1
+    if sed "$KEY_PATTERN" "$1" >"$rk_clean" 2>/dev/null && mv -f "$rk_clean" "$1"; then
+        return 0
+    fi
+    rm -f "$rk_clean"
+    return 1
+}
+
+# After a write: tidies the backups of the file, and forgets the new backup if it is gone.
+settle_backup() {
+    tidy_backups "$1"
+    if [ -n "$BACKUP" ] && [ ! -f "$BACKUP" ]; then
+        BACKUP=''
+    fi
+}
+
+# The installer tidies the backups of each file that an agent uses, also when the file needs no change.
+uses_file() { USED="$USED$1$NL"; }
 
 # Replaces a file with new content in one step: commit_file TARGET FILE_WITH_NEW_CONTENT.
 # The new file is written next to the target, then renamed over it. A symbolic link stays a link.
@@ -888,6 +934,7 @@ PY
 json_state() {
     js_file=$1
     JSON_STATE=absent JSON_BLANK=1
+    uses_file "$js_file"
     [ -e "$js_file" ] || return 0
     if [ ! -f "$js_file" ] || [ ! -r "$js_file" ]; then
         finish fail "cannot read $(tilde "$js_file"). Not changed."
@@ -952,6 +999,7 @@ json_install() {
     fi
     if [ "$JSON_BLANK" = 1 ]; then ji_operation='new'; else ji_operation='set'; fi
     json_write "$ji_operation" "$ji_file" "$2" "$3" || return 0
+    settle_backup "$ji_file"
     finish changed "$ji_did $ji_where$(backup_note)"
 }
 
@@ -1006,6 +1054,7 @@ add_note() {
 # installer cannot use the file.
 hooks_state() {
     HOOK_STATE=absent
+    uses_file "$1"
     if [ "$JSON_TOOL" = none ]; then
         add_note "The inbox hooks need python3 or jq, so they were not changed."
         return 1
@@ -1066,6 +1115,7 @@ hooks_install() {
         : >"$LOG"
         return 0
     fi
+    settle_backup "$hi_file"
     add_note "Added the inbox hooks to $hi_where$(backup_note)."
     R_STATE=changed
     hooked
@@ -1573,7 +1623,37 @@ claude_install() {
 
 claude_has_plugin() { output_has "\"id\":\"$PLUGIN_ID\"" claude plugin list --json; }
 
+# version_at_least HAVE NEED: for versions that are numbers with dots between them.
+version_at_least() {
+    va_have=$1 va_need=$2
+    while [ -n "$va_need" ]; do
+        va_a=${va_have%%.*} va_b=${va_need%%.*}
+        if [ "${va_a:-0}" -gt "$va_b" ]; then return 0; fi
+        if [ "${va_a:-0}" -lt "$va_b" ]; then return 1; fi
+        case $va_have in *.*) va_have=${va_have#*.} ;; *) va_have='' ;; esac
+        case $va_need in *.*) va_need=${va_need#*.} ;; *) va_need='' ;; esac
+    done
+    return 0
+}
+
+# False when Claude Code is too old to save the API key of the plugin from stdin. An earlier
+# version accepts the key only as an argument, where other users can see it, so the installer
+# stops for Claude Code before it installs the plugin. Sets CLAUDE_VERSION. When the command does
+# not give a version, the installer continues.
+claude_can_configure() {
+    CLAUDE_VERSION=$(claude --version 2>/dev/null </dev/null) || CLAUDE_VERSION=''
+    CLAUDE_VERSION=${CLAUDE_VERSION%% *}
+    case $CLAUDE_VERSION in
+        '' | *[!0-9.]* | .* | *. | *..*) return 0 ;;
+    esac
+    version_at_least "$CLAUDE_VERSION" "$CLAUDE_MIN_VERSION"
+}
+
 claude_plugin_install() {
+    if ! claude_can_configure; then
+        finish fail "Claude Code $CLAUDE_VERSION is too old for the Relaydeck plugin, which needs $CLAUDE_MIN_VERSION or later. Run \"claude update\", then run this installer again. Not changed."
+        return 0
+    fi
     if claude_has_plugin; then cp_have=1; else cp_have=0; fi
     if [ "$DRY_RUN" = 1 ]; then
         if [ "$cp_have" = 1 ]; then
@@ -1808,6 +1888,7 @@ codex_plugin_install() {
 codex_table_install() {
     ci_file=$(codex_config)
     ci_where=$(tilde "$ci_file")
+    uses_file "$ci_file"
     codex_state
     case $CODEX_STATE in
         same)
@@ -1850,6 +1931,7 @@ codex_table_install() {
         finish fail "Codex did not accept the new entry. $ci_where has its earlier content."
         return 0
     fi
+    settle_backup "$ci_file"
     finish changed "$ci_did $ci_where$(backup_note)"
 }
 
@@ -1886,6 +1968,7 @@ codex_plugin_uninstall() {
 
 codex_table_uninstall() {
     cu_where=$(tilde "$(codex_config)")
+    uses_file "$(codex_config)"
     codex_state
     if [ "$CODEX_STATE" = broken ]; then
         codex_broken
@@ -2140,9 +2223,14 @@ run_agents() {
     say ""
     for AGENT in $AGENTS; do
         : >"$LOG"
-        WROTE=''
+        WROTE='' USED=''
         finish fail "stopped before the end."
         "${AGENT}_${ACTION}" || true
+        if [ "$DRY_RUN" = 0 ]; then
+            printf '%s' "$USED" | while IFS= read -r ra_file; do
+                tidy_backups "$ra_file"
+            done
+        fi
         report
     done
 }
@@ -2204,6 +2292,7 @@ main() {
     : >"$LOG"
     find_json_tool
 
+    USED=''
     say "${BOLD}Relaydeck installer${RESET}"
     say "Connects your coding agents to the Relaydeck app on iPhone, iPad, and Apple Watch."
     say "${DIM}Server: $URL${RESET}"

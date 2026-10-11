@@ -28,6 +28,7 @@ MENU_PROMPT = "Press Enter to continue: "
 GOOD_KEY = "mck_" + "A1b2C3d4" * 5
 SECOND_KEY = "mck_" + "Z9y8X7w6" * 5
 BAD_KEY = "mck_" + "0" * 40
+OLD_KEY = "mck_" + "0ldKey00" * 5
 
 SYSTEM_TOOLS = (
     "basename",
@@ -47,6 +48,7 @@ SYSTEM_TOOLS = (
     "readlink",
     "rm",
     "rmdir",
+    "sed",
     "stty",
     "tail",
     "tr",
@@ -83,7 +85,11 @@ def stop(message):
     print(message)
     sys.exit(1)
 
-if ARGS[:3] == ["plugin", "list", "--json"]:
+if ARGS == ["--version"]:
+    if "version" in FAIL:
+        stop("claude: the version is not known")
+    print(os.environ.get("STUB_CLAUDE_VERSION", "2.1.296") + " (Claude Code)")
+elif ARGS[:3] == ["plugin", "list", "--json"]:
     listed = [{"id": plugin, "version": "1.0.0", "scope": "user", "enabled": True} for plugin in state["plugins"]]
     print(json.dumps(listed, indent=2))
 elif ARGS[:4] == ["plugin", "marketplace", "list", "--json"]:
@@ -520,6 +526,11 @@ def box(tmp_path: Path, shell: str, toolbox: dict[str, Path]) -> Sandbox:
 
 def backups(path: Path) -> list[Path]:
     return sorted(path.parent.glob(path.name + ".relaydeck-backup-*"))
+
+
+def files_with(box: Sandbox, text: str) -> list[str]:
+    """Each file under the home and the Codex directory that has this text."""
+    return sorted(name for name, content in box.snapshot().items() if text.encode() in content)
 
 
 def entry(url: str, key: str = GOOD_KEY, url_field: str = "url") -> Json:
@@ -1171,12 +1182,57 @@ def test_a_new_key_replaces_the_old_key(box: Sandbox, key_server: KeyServer) -> 
 
     cursor = box.home / ".cursor/mcp.json"
     assert read_json(cursor) == {"mcpServers": {"tasks": entry(key_server.url, SECOND_KEY)}}
-    assert len(backups(cursor)) == 1
     config = box.codex_home / "config.toml"
     servers = tomllib.loads(config.read_text())["mcp_servers"]
     assert servers == {"tasks": {"url": key_server.url, "http_headers": {"Authorization": f"Bearer {SECOND_KEY}"}}}
-    assert len(backups(config)) == 1
-    assert GOOD_KEY in backups(config)[0].read_text()
+    # The backup of a key change would hold only the old key, so there is none.
+    assert backups(cursor) == []
+    assert "backup" not in next(line for line in result.out.splitlines() if "Cursor" in line)
+    assert files_with(box, GOOD_KEY) == []
+    assert files_with(box, SECOND_KEY) == ["codex/config.toml", "home/.cursor/mcp.json"]
+
+
+def test_a_backup_never_keeps_a_key(box: Sandbox, key_server: KeyServer) -> None:
+    """A backup keeps the other configuration of the person. It does not keep an API key."""
+    box.stub("codex", CODEX_STUB)
+    cursor = box.home / ".cursor/mcp.json"
+    cursor.parent.mkdir()
+    cursor.write_text(CURSOR_FILE)
+    config = box.codex_home / "config.toml"
+    toml = 'model = "gpt"\n'
+    config.write_text(toml)
+    # An earlier version of the installer left a backup that has a key.
+    earlier = cursor.with_name("mcp.json.relaydeck-backup-20260101-120000")
+    earlier.write_text(f'{{"mcpServers": {{"tasks": {{"headers": {{"Authorization": "Bearer {OLD_KEY}"}}}}}}}}\n')
+    args = ["--url", key_server.url, "--agents", "codex,cursor"]
+
+    assert box.run(*args, "--name", "relay", key=GOOD_KEY).code == 0
+    # The second server makes a backup of a file that has the key of the first server.
+    assert box.run(*args, key=SECOND_KEY).code == 0
+    saved = [backup.read_text() for backup in backups(cursor)]
+    assert len(saved) == 3
+    assert saved[0] == '{"mcpServers": {"tasks": {"headers": {"Authorization": "Bearer relaydeck-key-removed"}}}}\n'
+    assert CURSOR_FILE in saved
+    assert any('"relay"' in text and '"github"' in text and "Bearer relaydeck-key-removed" in text for text in saved)
+    kept = [name for name in box.files() if "relaydeck-backup" in name]
+    assert len(kept) > len(saved)
+    assert not any(b"mck_" in box.snapshot()[name] for name in kept)
+    assert files_with(box, OLD_KEY) == []
+    assert files_with(box, GOOD_KEY) == ["codex/config.toml", "home/.cursor/mcp.json"]
+
+    # A run that changes no file leaves the backups without keys too.
+    earlier.write_text(f"Bearer {OLD_KEY}\n")
+    assert "No change." in box.run(*args, key=SECOND_KEY).out
+    assert earlier.read_text() == "Bearer relaydeck-key-removed\n"
+
+    assert box.run(*args, "--name", "relay", "--uninstall").code == 0
+    assert box.run(*args, "--uninstall").code == 0
+    assert cursor.read_text() == CURSOR_FILE
+    assert config.read_text() == toml
+    assert files_with(box, "mck_") == []
+    # The files have their first content again, so the backups of that content are gone.
+    assert CURSOR_FILE not in [backup.read_text() for backup in backups(cursor)]
+    assert toml not in [backup.read_text() for backup in backups(config)]
 
 
 FOREIGN = '{\n  "mcpServers": {\n    "tasks": {\n      "url": "https://other.example/mcp"\n    }\n  }\n}\n'
@@ -1244,16 +1300,17 @@ def test_uninstall_removes_only_the_relaydeck_entry(box: Sandbox, key_server: Ke
     assert config.read_text() == toml
     assert read_json(box.home / ".gemini/settings.json") == {"mcpServers": {}}
     assert box.claude_state()["servers"] == {}
-    assert [backup.read_text() for backup in backups(cursor)] == [CURSOR_FILE]
-    assert [backup.read_text() for backup in backups(config)] == [toml]
-    assert not any(GOOD_KEY.encode() in content for content in box.snapshot().values())
+    # Each file has its first content again, so the backups of that content are gone too.
+    assert backups(cursor) == []
+    assert backups(config) == []
+    assert files_with(box, "mck_") == []
     assert GOOD_KEY not in result.text
 
     again = box.run(*agents, "--uninstall")
     assert again.code == 0
     assert again.out.count("Nothing to remove.") == 4
     assert "Removed Relaydeck from 0 agents." in again.out
-    assert len(backups(cursor)) == 1
+    assert [name for name in box.files() if "relaydeck-backup" in name] == []
 
 
 def test_a_dry_run_changes_nothing(box: Sandbox, key_server: KeyServer) -> None:
@@ -1299,6 +1356,7 @@ def test_claude_code_uses_the_plugin_for_the_hosted_server(box: Sandbox) -> None
     assert "Inbox hooks are on for: Claude Code." in result.out
     assert "trust the Relaydeck hooks" not in result.out
     assert box.commands("claude") == [
+        "--version",
         "plugin list --json",
         "plugin marketplace add Aayush9029/mcp-server",
         "plugin install relaydeck@relaydeck --scope user",
@@ -1320,7 +1378,8 @@ def test_claude_code_uses_the_plugin_for_the_hosted_server(box: Sandbox) -> None
     again = box.run("--agents", "claude", key=SECOND_KEY)
     assert again.code == 0, again.text
     assert "is already installed. Saved the API key again." in again.out
-    assert box.commands("claude")[4:] == [
+    assert box.commands("claude")[5:] == [
+        "--version",
         "plugin list --json",
         "plugin marketplace update relaydeck",
         "plugin update relaydeck@relaydeck --scope user",
@@ -1335,6 +1394,35 @@ def test_claude_code_uses_the_plugin_for_the_hosted_server(box: Sandbox) -> None
     assert "removed the plugin relaydeck@relaydeck and the marketplace relaydeck" in removed.out
     assert box.claude_state() == {"marketplaces": [], "plugins": [], "key": None, "servers": {}}
     assert "Nothing to remove." in box.run("--agents", "claude", "--uninstall").out
+
+
+@pytest.mark.parametrize("version", ["2.1.284", "2.1.9", "2.0.76", "1.0.120"])
+def test_an_old_claude_code_is_not_changed(box: Sandbox, version: str) -> None:
+    """An earlier Claude Code cannot save the key of the plugin from stdin, so the plugin would stay without a key."""
+    box.stub("claude", CLAUDE_STUB)
+    box.stub("curl", CURL_STUB)
+    for extra in ([], ["--dry-run"]):
+        result = box.run("--agents", "claude", *extra, key=GOOD_KEY, env={"STUB_CLAUDE_VERSION": version})
+        assert result.code == 1
+        line = next(line for line in result.out.splitlines() if "Claude Code" in line)
+        assert f"Claude Code {version} is too old for the Relaydeck plugin, which needs 2.1.285 or later." in line
+        assert 'Run "claude update", then run this installer again. Not changed.' in line
+        assert "Not complete for 1 agent." in result.out
+        assert GOOD_KEY not in result.text
+    assert box.commands("claude") == ["--version", "--version"]
+    assert not (box.state / "claude.json").exists()
+
+
+@pytest.mark.parametrize("version", ["2.1.285", "2.1.296", "2.2.0", "2.10.1", "3.0.0", ""])
+def test_a_new_claude_code_gets_the_plugin(box: Sandbox, version: str) -> None:
+    box.stub("claude", CLAUDE_STUB)
+    box.stub("curl", CURL_STUB)
+    # Without a version from the command, the installer continues.
+    env = {"STUB_CLAUDE_VERSION": version} if version else {"STUB_FAIL": "version"}
+    result = box.run("--agents", "claude", key=GOOD_KEY, env=env)
+    assert result.code == 0, result.text
+    assert "installed the plugin relaydeck@relaydeck with the inbox hooks." in result.out
+    assert box.claude_state()["key"] == GOOD_KEY
 
 
 @pytest.mark.parametrize(
@@ -1484,8 +1572,7 @@ def test_the_codex_plugin_keeps_its_server(box: Sandbox, key_server: KeyServer) 
     assert removed.code == 0, removed.text
     assert 'removed "tasks" from' in removed.out
     assert config.read_text() == original
-    assert backups(config) == [backups(config)[0]]
-    assert backups(config)[0].read_text() == original
+    assert backups(config) == []
 
 
 def codex_plugins(box: Sandbox) -> Json:
