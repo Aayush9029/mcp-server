@@ -133,3 +133,14 @@ A coding agent that supports hooks can read the inbox without a tool call. A hoo
 ```bash
 curl -s "https://relaydeck.onrender.com/v1/inbox" -H "Authorization: Bearer $TASKS_API_KEY"
 ```
+
+The [Relaydeck plugin](../plugins/relaydeck/README.md) has such hooks for Claude Code and Codex, and the install script adds them for Cursor and Gemini CLI. The items that a hook gives to the agent become read.
+
+| Moment | What the hook does | Agents |
+|--------|--------------------|--------|
+| A session starts | Puts the unread items into the context | Claude Code, Codex, Cursor, Gemini CLI |
+| The person sends a prompt | Puts the unread items into the context | Claude Code, Codex, Gemini CLI |
+| The agent is about to stop | Gives the unread items to the agent, and the agent continues. One item does not continue the agent two times. | Claude Code, Codex, Cursor, Gemini CLI |
+| The agent waits for the person | Holds one request with `wait=50` and `mark_read=false`, and wakes the agent when an item comes | Claude Code |
+
+Codex runs the hooks of a plugin only after the person trusts them with `/hooks`. An agent without hooks gets the line `Inbox: 2 unread. Call check_inbox.` on its tool results.

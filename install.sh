@@ -19,7 +19,10 @@ PLUGIN_ID="relaydeck@relaydeck"
 PLUGIN_MARKETPLACE="relaydeck"
 PLUGIN_REPO="Aayush9029/mcp-server"
 
-AGENT_IDS="claude codex cursor gemini opencode zed"
+AGENT_IDS="claude codex cursor gemini opencode zed copilot antigravity kiro droid cline amp"
+
+# The hook script of the Relaydeck plugin has this name in the folder of an agent that has no plugin.
+HOOK_FILE="relaydeck-inbox.sh"
 NL='
 '
 
@@ -56,7 +59,8 @@ Relaydeck installer
 
 Connects the coding agents on this machine to a Relaydeck MCP server. The agents
 can then make tasks, send notifications, and ask you questions on your iPhone,
-iPad, and Apple Watch.
+iPad, and Apple Watch. They also get the tasks, answers, and messages that you
+send from the app.
 
 Usage:
   curl -fsSL $INSTALL_URL | sh
@@ -64,13 +68,14 @@ Usage:
 
 Options:
   --agents LIST   Agents to set up, with commas between them:
-                  claude, codex, cursor, gemini, opencode, zed
+                  claude, codex, cursor, gemini, opencode, zed, copilot,
+                  antigravity, kiro, droid, cline, amp
   --key KEY       API key. Other users can see a command line, so the prompt
                   or RELAYDECK_API_KEY is safer.
   --url URL       MCP endpoint (default: $DEFAULT_URL)
   --name NAME     Name of the MCP server in each agent (default: $DEFAULT_NAME)
-  --uninstall     Remove the server from the agents. This removes only an
-                  entry that has the same name and the same URL.
+  --uninstall     Remove the server and the inbox hooks from the agents. This
+                  removes only an entry that has the same name and the same URL.
   --dry-run       Show the changes, and change nothing
   --yes           Skip the agent menu and use each agent that was found
   --help          Show this text
@@ -231,6 +236,12 @@ agent_label() {
         gemini) echo "Gemini CLI" ;;
         opencode) echo "opencode" ;;
         zed) echo "Zed" ;;
+        copilot) echo "GitHub Copilot CLI" ;;
+        antigravity) echo "Antigravity" ;;
+        kiro) echo "Kiro" ;;
+        droid) echo "Factory Droid" ;;
+        cline) echo "Cline" ;;
+        amp) echo "Amp" ;;
     esac
 }
 
@@ -242,10 +253,22 @@ listed() {
 }
 
 detect_agents() {
-    DETECTED=''
+    DETECTED='' MISSING=''
     for da_id in $AGENT_IDS; do
         if "detect_$da_id"; then
             DETECTED="${DETECTED:+$DETECTED }$da_id"
+        else
+            MISSING="${MISSING:+$MISSING, }$(agent_label "$da_id")"
+        fi
+    done
+}
+
+# Sets CONNECTED to the agents in DETECTED that have this server now.
+find_connected() {
+    CONNECTED=''
+    for fc_id in $DETECTED; do
+        if "${fc_id}_connected"; then
+            CONNECTED="${CONNECTED:+$CONNECTED }$fc_id"
         fi
     done
 }
@@ -257,7 +280,10 @@ read_agent_list() {
         case $ra_item in
             claude | claude-code | claudecode) ra_item=claude ;;
             gemini | gemini-cli) ra_item=gemini ;;
-            codex | cursor | opencode | zed) ;;
+            copilot | copilot-cli | github-copilot) ra_item=copilot ;;
+            kiro | kiro-cli) ra_item=kiro ;;
+            droid | factory | factory-droid) ra_item=droid ;;
+            codex | cursor | opencode | zed | antigravity | cline | amp) ;;
             *) usage_error "Unknown agent: $ra_item" ;;
         esac
         if ! listed "$ra_item" "$AGENTS"; then
@@ -267,17 +293,22 @@ read_agent_list() {
     [ -n "$AGENTS" ] || usage_error "--agents needs one agent or more."
 }
 
-# toggle_agent ID WORD: WORD is the text that the person typed, for the message.
+# toggle_agent WORD: WORD is the number in the menu that the person typed.
 toggle_agent() {
-    if [ -z "$1" ]; then
-        tty_say "${YELLOW}\"$2\" is not a number in the list.${RESET}"
+    ta_id='' ta_count=0
+    for ta_item in $DETECTED; do
+        ta_count=$((ta_count + 1))
+        if [ "$ta_count" = "$1" ]; then ta_id=$ta_item; fi
+    done
+    if [ -z "$ta_id" ]; then
+        tty_say "${YELLOW}\"$1\" is not a number in the list.${RESET}"
         return 0
     fi
     ta_next=''
-    for ta_id in $AGENT_IDS; do
-        if listed "$ta_id" "$AGENTS"; then ta_on=1; else ta_on=0; fi
-        if [ "$ta_id" = "$1" ]; then ta_on=$((1 - ta_on)); fi
-        if [ "$ta_on" = 1 ]; then ta_next="${ta_next:+$ta_next }$ta_id"; fi
+    for ta_item in $DETECTED; do
+        if listed "$ta_item" "$AGENTS"; then ta_on=1; else ta_on=0; fi
+        if [ "$ta_item" = "$ta_id" ]; then ta_on=$((1 - ta_on)); fi
+        if [ "$ta_on" = 1 ]; then ta_next="${ta_next:+$ta_next }$ta_item"; fi
     done
     AGENTS=$ta_next
 }
@@ -285,17 +316,23 @@ toggle_agent() {
 show_menu() {
     tty_say ""
     if [ "$ACTION" = install ]; then
-        tty_say "${BOLD}Which agents do you want to connect?${RESET}"
+        tty_say "${BOLD}Agents on this machine${RESET}  ${DIM}[x] = connect${RESET}"
     else
-        tty_say "${BOLD}Which agents do you want to disconnect?${RESET}"
+        tty_say "${BOLD}Agents on this machine${RESET}  ${DIM}[x] = disconnect${RESET}"
     fi
     sm_number=0
-    for sm_id in $AGENT_IDS; do
+    for sm_id in $DETECTED; do
         sm_number=$((sm_number + 1))
         if listed "$sm_id" "$AGENTS"; then sm_box="[x]"; else sm_box="[ ]"; fi
-        if listed "$sm_id" "$DETECTED"; then sm_note=''; else sm_note="${DIM}(not found)${RESET}"; fi
-        printf '  %s %d) %-12s %s\n' "$sm_box" "$sm_number" "$(agent_label "$sm_id")" "$sm_note" >/dev/tty
+        if listed "$sm_id" "$CONNECTED"; then sm_note="${GREEN}${MARK_DONE} connected${RESET}"; else sm_note=''; fi
+        printf '  %s %2d) %-19s %s\n' "$sm_box" "$sm_number" "$(agent_label "$sm_id")" "$sm_note" >/dev/tty
     done
+    if [ -n "$MISSING" ]; then
+        tty_say "${DIM}Not found: $MISSING. Use --agents to connect one of them.${RESET}"
+    fi
+    if [ -d "$HOME/.t3" ]; then
+        tty_say "${DIM}T3 Code uses the agents in this list, so it needs no setup of its own.${RESET}"
+    fi
 }
 
 menu() {
@@ -305,10 +342,9 @@ menu() {
         [ -n "$REPLY" ] || break
         for mn_word in $(printf '%s' "$REPLY" | tr ',' ' '); do
             case $mn_word in
-                a | A | all) AGENTS=$AGENT_IDS ;;
+                a | A | all) AGENTS=$DETECTED ;;
                 n | N | none) AGENTS='' ;;
-                [1-9]) toggle_agent "$(printf '%s\n' "$AGENT_IDS" | cut -d ' ' -f "$mn_word")" "$mn_word" ;;
-                *) tty_say "${YELLOW}\"$mn_word\" is not a number in the list.${RESET}" ;;
+                *) toggle_agent "$mn_word" ;;
             esac
         done
     done
@@ -317,10 +353,13 @@ menu() {
 choose_agents() {
     [ -z "$AGENTS" ] || return 0
     detect_agents
+    [ -n "$DETECTED" ] || die "No supported agent was found. Use --agents to choose one. Manual steps: $MANUAL_URL"
     AGENTS=$DETECTED
-    if [ "$YES" = 1 ]; then
-        [ -n "$AGENTS" ] || die "No supported agent was found. Use --agents to choose one. Manual steps: $MANUAL_URL"
-        return 0
+    [ "$YES" = 0 ] || return 0
+    say "Looking at the agents on this machine ..."
+    find_connected
+    if [ "$ACTION" = uninstall ]; then
+        AGENTS=$CONNECTED
     fi
     menu
 }
@@ -335,7 +374,10 @@ verify_key() {
         curl -sS -K - -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 90 \
             "$(api_base)/v1/tasks?limit=1" 2>"$LOG") || vk_code=000
     case $vk_code in
-        200) VERIFIED=ok ;;
+        200)
+            VERIFIED=ok
+            say "  ${GREEN}${MARK_DONE}${RESET} The server accepted the API key."
+            ;;
         401 | 403) VERIFIED=bad ;;
         *) VERIFIED=error ;;
     esac
@@ -390,7 +432,7 @@ report() {
         plan) rp_mark="${DIM}${MARK_PLAN}${RESET}" ;;
         *) rp_mark="${RED}${MARK_FAIL}${RESET}" && FAILED=$((FAILED + 1)) ;;
     esac
-    printf '  %s %-12s %s\n' "$rp_mark" "$(agent_label "$AGENT")" "$R_TEXT"
+    printf '  %s %-19s %s\n' "$rp_mark" "$(agent_label "$AGENT")" "$R_TEXT"
     if [ "$R_STATE" = fail ]; then
         print_log
     fi
@@ -481,10 +523,10 @@ restore_backup() {
 
 # ---------------------------------------------------------------- JSON files
 #
-# Cursor, Gemini CLI, opencode, and Zed keep MCP servers in a JSON file. python3 changes only the
-# entry and keeps each other byte, comments included. jq is the second choice: it reads strict JSON
-# only and prints the file again with a 2-space indent. Without the two tools, the installer can
-# only make a new file.
+# Most agents keep MCP servers in a JSON file, and Cursor and Gemini CLI keep hooks in one too.
+# python3 changes only the entry and keeps each other byte, comments included. jq is the second
+# choice: it reads strict JSON only and prints the file again with a 2-space indent. Without the
+# two tools, the installer can only make a new file.
 
 find_json_tool() {
     JSON_TOOL=none PYTHON=''
@@ -514,14 +556,45 @@ find_json_tool() {
     JQ_NEW='{($box): {($name): (env.RD_ENTRY | fromjson)}}'
     JQ_SET='.[$box] = ((.[$box] // {}) + {($name): (env.RD_ENTRY | fromjson)})'
     JQ_REMOVE='del(.[$box][$name])'
+    # Hooks: $box holds one list for each event, and $name is the text that marks a Relaydeck hook.
+    JQ_HOOKS_STATUS='
+(env.RD_HOOKS | fromjson) as $want
+| if type != "object" then error("the top level is not an object") else . end
+| (if has($box) then .[$box] else {} end) as $have
+| [$want | to_entries[] | . as $event
+    | (($have[$event.key] // []) | map(select(tojson | contains($name)))) as $ours
+    | {count: ($ours | length), same: ($ours == [$event.value])}] as $rows
+| if ([$rows[].count] | add) == 0 then "absent" elif ([$rows[].same] | all) then "same" else "stale" end'
+    JQ_HOOKS_SET='
+(env.RD_HOOKS | fromjson) as $want
+| reduce ($want | to_entries[]) as $event (.;
+    .[$box][$event.key] = [$event.value] + ((.[$box][$event.key] // []) | map(select(tojson | contains($name) | not))))'
+    JQ_HOOKS_REMOVE='
+(env.RD_HOOKS | fromjson) as $want
+| reduce ($want | keys[]) as $event (.;
+    if (.[$box] | type) == "object" and (.[$box][$event] // [] | any(tojson | contains($name))) then
+        .[$box][$event] |= map(select(tojson | contains($name) | not))
+        | if .[$box][$event] == [] then del(.[$box][$event]) else . end
+        | if .[$box] == {} then del(.[$box]) else . end
+    else . end)'
 }
 
 # json_tool status|new|set|remove FILE BOX FIELD
 # BOX is the object that holds the servers. FIELD is the member of an entry that holds the URL.
 # "status" prints absent, same, stale (same URL, different content), or foreign (different URL).
 # The other operations write the new file text to $WORK/out. JSON_ENTRY holds the entry.
+#
+# json_tool hooks-status|hooks-set|hooks-remove FILE BOX
+# BOX is the object that holds one list of hooks for each event. HOOKS_JSON holds one hook for
+# each event. A hook is from Relaydeck when it has the name of the hook script in it.
 json_tool() {
     case $JSON_TOOL:$1 in
+        python:hooks-*) json_python "$1" "$2" "$3" "$HOOK_FILE" '' ;;
+        jq:hooks-status) RD_HOOKS=$HOOKS_JSON jq -r --arg box "$3" --arg name "$HOOK_FILE" "$JQ_HOOKS_STATUS" "$2" ;;
+        jq:hooks-set) RD_HOOKS=$HOOKS_JSON jq --arg box "$3" --arg name "$HOOK_FILE" "$JQ_HOOKS_SET" "$2" >"$WORK/out" ;;
+        jq:hooks-remove)
+            RD_HOOKS=$HOOKS_JSON jq --arg box "$3" --arg name "$HOOK_FILE" "$JQ_HOOKS_REMOVE" "$2" >"$WORK/out"
+            ;;
         python:*) json_python "$1" "$2" "$3" "$NAME" "$4" ;;
         jq:status) RD_ENTRY=$JSON_ENTRY jq -r --arg box "$3" --arg name "$NAME" --arg field "$4" "$JQ_STATUS" "$2" ;;
         jq:new) RD_ENTRY=$JSON_ENTRY jq -n --arg box "$3" --arg name "$NAME" "$JQ_NEW" >"$WORK/out" ;;
@@ -533,7 +606,7 @@ json_tool() {
 }
 
 json_python() {
-    RD_ENTRY=$JSON_ENTRY RD_OUT=$WORK/out "$PYTHON" -I - "$@" <<'PY'
+    RD_ENTRY=${JSON_ENTRY:-} RD_HOOKS=${HOOKS_JSON:-} RD_OUT=$WORK/out "$PYTHON" -I - "$@" <<'PY'
 import json
 import os
 import re
@@ -555,6 +628,7 @@ class Doc:
         self.text = text
         self.members = {}  # path -> (start of the name, start of the value, end of the value)
         self.objects = {}  # path -> (position of "{", position of "}")
+        self.arrays = {}  # path -> (position of "[", position of "]")
         self.trailing_commas = 0
         self.value, end = self.read((), self.skip(0))
         if self.skip(end) < len(text):
@@ -621,6 +695,7 @@ class Doc:
         i = self.skip(start + 1)
         while text[i : i + 1] != "]":
             value, end = self.read(path + (len(result),), i)
+            self.members[path + (len(result),)] = (i, i, end)
             result.append(value)
             i = self.skip(end)
             if text[i : i + 1] == ",":
@@ -628,6 +703,7 @@ class Doc:
                 self.trailing_commas += text[i : i + 1] == "]"
             elif text[i : i + 1] != "]":
                 self.fail(i, 'a "," or a "]" must be here')
+        self.arrays[path] = (start, i)
         return result, i + 1
 
 
@@ -654,11 +730,11 @@ def render(value, step, indent, newline):
 
 
 def add_member(doc, path, key, value):
-    """The text with a new first member in the object at path."""
+    """The text with a new first member in the object at path. Without a key: a new first item in the list."""
     text = doc.text
     newline, step = layout(doc)
-    start, end = doc.objects[path]
-    name = json.dumps(key, ensure_ascii=False) + ": "
+    start, end = doc.arrays[path] if key is None else doc.objects[path]
+    name = "" if key is None else json.dumps(key, ensure_ascii=False) + ": "
     body = text[start + 1 : end]
     first = body.lstrip(" \t")
     if not body.strip():
@@ -698,19 +774,74 @@ def remove_member(doc, path):
     return text[:start] + text[INDENT.match(text, end).end() :]
 
 
+def read_doc(path):
+    try:
+        with open(path, encoding="utf-8", newline="") as source:
+            doc = Doc(source.read())
+    except UnicodeDecodeError:
+        raise Invalid("the file is not UTF-8 text")
+    if not isinstance(doc.value, dict):
+        raise Invalid("the top level is not an object")
+    return doc
+
+
+def hooks(operation, path, box, marker):
+    """Adds or removes one hook for each event. A hook with the marker in it is from Relaydeck."""
+    want = json.loads(os.environ["RD_HOOKS"])
+    doc = read_doc(path)
+    have = doc.value.get(box, {})
+    if not isinstance(have, dict) or not all(isinstance(have.get(event, []), list) for event in want):
+        raise Invalid('"%s" does not hold lists of hooks' % box)
+    ours = {event: [hook for hook in have.get(event, []) if marker in json.dumps(hook)] for event in want}
+    if operation == "hooks-status":
+        if not any(ours.values()):
+            print("absent")
+        else:
+            print("same" if all(ours[event] == [hook] for event, hook in want.items()) else "stale")
+        return None
+    expected = dict(doc.value)
+    expected[box] = dict(have)
+    text = doc.text
+    for event, hook in want.items():
+        others = [other for other in have.get(event, []) if other not in ours[event]]
+        for index in reversed(range(len(have.get(event, [])))):
+            if have[event][index] in ours[event]:
+                text = remove_member(Doc(text), (box, event, index))
+        now = Doc(text)
+        if operation == "hooks-set":
+            expected[box][event] = [hook] + others
+            if box not in now.value:
+                text = add_member(now, (), box, {event: [hook]})
+            elif event not in now.value[box]:
+                text = add_member(now, (box,), event, [hook])
+            else:
+                text = add_member(now, (box, event), None, hook)
+        elif ours[event]:
+            expected[box][event] = others
+            if not others:
+                del expected[box][event]
+                text = remove_member(now, (box, event))
+    if operation == "hooks-remove" and any(ours.values()) and not expected[box]:
+        del expected[box]
+        text = remove_member(Doc(text), (box,))
+    return doc, text, expected
+
+
 def main():
     operation, path, box, name, field = sys.argv[1:6]
     want = json.loads(os.environ.get("RD_ENTRY") or "null")
-    if operation == "new":
+    if operation.startswith("hooks-"):
+        changed = hooks(operation, path, box, name)
+        if changed is None:
+            return
+        doc, text, expected = changed
+        result = Doc(text)
+        if result.value != expected or result.trailing_commas > doc.trailing_commas:
+            raise Invalid("the installer cannot change this file safely")
+    elif operation == "new":
         text = json.dumps({box: {name: want}}, indent=2, ensure_ascii=False) + "\n"
     else:
-        try:
-            with open(path, encoding="utf-8", newline="") as source:
-                doc = Doc(source.read())
-        except UnicodeDecodeError:
-            raise Invalid("the file is not UTF-8 text")
-        if not isinstance(doc.value, dict):
-            raise Invalid("the top level is not an object")
+        doc = read_doc(path)
         servers = doc.value.get(box, {})
         if not isinstance(servers, dict):
             raise Invalid('"%s" is not an object' % box)
@@ -791,6 +922,7 @@ json_write() {
         finish fail "could not write $(tilde "$2"). Not changed."
         return 1
     fi
+    WROTE=$2
 }
 
 # json_install FILE BOX FIELD ENTRY
@@ -843,7 +975,134 @@ json_uninstall() {
     esac
 }
 
+# True when the file has a server with this name and this URL: json_connected FILE BOX FIELD
+json_connected() {
+    [ "$JSON_TOOL" != none ] && [ -f "$1" ] || return 1
+    JSON_ENTRY=$(printf '{"%s":"%s"}' "$3" "$URL")
+    jc_state=$(json_tool status "$1" "$2" "$3" 2>/dev/null) || return 1
+    case $jc_state in same | stale) return 0 ;; esac
+    return 1
+}
+
 auth_header() { printf '"headers":{"Authorization":"Bearer %s"}' "$KEY"; }
+
+# ---------------------------------------------------------------- inbox hooks
+#
+# The inbox hooks give an agent the tasks, answers, and messages from the app without a prompt.
+# Claude Code and Codex get them from the Relaydeck plugin. Cursor and Gemini CLI have hooks and
+# no Relaydeck plugin, so the installer puts the hook script of the plugin into the folder of the
+# agent and adds the hooks to the hook file of the agent.
+
+hooked() { HOOKED="${HOOKED:+$HOOKED, }$(agent_label "$AGENT")"; }
+
+# Adds a sentence to the result of the agent.
+add_note() {
+    R_TEXT=${R_TEXT% No change.}
+    case $R_TEXT in *.) ;; *) R_TEXT="$R_TEXT." ;; esac
+    R_TEXT="$R_TEXT $1"
+}
+
+# Sets HOOK_STATE for the hooks in a file: absent, same, or stale. Fails with a note when the
+# installer cannot use the file.
+hooks_state() {
+    HOOK_STATE=absent
+    if [ "$JSON_TOOL" = none ]; then
+        add_note "The inbox hooks need python3 or jq, so they were not changed."
+        return 1
+    fi
+    [ -e "$1" ] || return 0
+    if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+        add_note "The inbox hooks were not changed: cannot read $(tilde "$1")."
+        return 1
+    fi
+    grep -q '[^[:space:]]' "$1" || return 0
+    if HOOK_STATE=$(json_tool hooks-status "$1" "$2" 2>"$LOG"); then
+        return 0
+    fi
+    add_note "The inbox hooks were not changed: $(tilde "$1") is not valid JSON for the installer."
+    : >"$LOG"
+    return 1
+}
+
+# Writes $WORK/out to a hook file. One run makes one backup of a file.
+hooks_write() {
+    BACKUP=''
+    if [ "${WROTE:-}" != "$1" ] && ! backup_file "$1" 2>"$LOG"; then
+        return 1
+    fi
+    if ! commit_file "$1" "$WORK/out" 2>"$LOG"; then
+        drop_backup
+        return 1
+    fi
+}
+
+# hooks_install DIR FILE BOX SEED: DIR gets the hook script, and FILE gets the hooks in HOOKS_JSON.
+# SEED is the content of a new FILE before it has hooks. The result of the agent gets a note.
+hooks_install() {
+    hi_script=$1/hooks/$HOOK_FILE hi_file=$2 hi_where=$(tilde "$2")
+    [ "$R_STATE" != fail ] || return 0
+    hooks_state "$hi_file" "$3" || return 0
+    hook_script
+    if [ "$HOOK_STATE" = same ] && [ -f "$hi_script" ] && cmp -s "$WORK/hook" "$hi_script"; then
+        hooked
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        if [ "$R_STATE" = same ]; then
+            finish plan "would add the inbox hooks to $hi_where"
+        else
+            R_TEXT="$R_TEXT, with the inbox hooks in $hi_where"
+        fi
+        return 0
+    fi
+    hi_source=$hi_file
+    if [ ! -e "$hi_file" ] || ! grep -q '[^[:space:]]' "$hi_file"; then
+        hi_source=$WORK/seed
+        printf '%s\n' "$4" >"$hi_source"
+    fi
+    if ! commit_file "$hi_script" "$WORK/hook" 2>"$LOG" ||
+        ! json_tool hooks-set "$hi_source" "$3" 2>"$LOG" || ! hooks_write "$hi_file"; then
+        add_note "The inbox hooks were not added: could not write $hi_where."
+        : >"$LOG"
+        return 0
+    fi
+    add_note "Added the inbox hooks to $hi_where$(backup_note)."
+    R_STATE=changed
+    hooked
+}
+
+# hooks_uninstall DIR FILE BOX: removes the hooks of Relaydeck from FILE and the script from DIR.
+hooks_uninstall() {
+    hu_script=$1/hooks/$HOOK_FILE hu_file=$2 hu_where=$(tilde "$2")
+    [ "$R_STATE" != fail ] || return 0
+    hooks_state "$hu_file" "$3" || return 0
+    if [ "$HOOK_STATE" = absent ] && [ ! -f "$hu_script" ]; then
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        if [ "$R_STATE" = same ]; then
+            finish plan "would remove the inbox hooks from $hu_where"
+        else
+            R_TEXT="$R_TEXT and the inbox hooks from $hu_where"
+        fi
+        return 0
+    fi
+    if [ "$HOOK_STATE" != absent ]; then
+        if ! json_tool hooks-remove "$hu_file" "$3" 2>"$LOG" || ! hooks_write "$hu_file"; then
+            add_note "The inbox hooks were not removed: could not write $hu_where."
+            : >"$LOG"
+            return 0
+        fi
+        drop_backup
+    fi
+    rm -f "$hu_script"
+    rmdir "$1/hooks" 2>/dev/null || true
+    if [ "$R_STATE" = same ]; then
+        finish changed "removed the inbox hooks from $hu_where"
+    else
+        R_TEXT="$R_TEXT and the inbox hooks from $hu_where"
+    fi
+}
 
 # True when the JSON that a command prints has the text $1. White space is ignored.
 output_has() {
@@ -854,11 +1113,450 @@ output_has() {
     return 1
 }
 
+# Writes the hook script to $WORK/hook. The lines between the two marks are a copy of
+# plugins/relaydeck/hooks/inbox.sh. A test compares the copy with that file.
+hook_script() {
+    cat >"$WORK/hook" <<'RELAYDECK_HOOK_SCRIPT'
+#!/bin/sh
+# Relaydeck inbox hook. One script serves the hooks of each coding agent.
+#
+#   inbox.sh AGENT EVENT [SERVER_NAME]
+#
+#   AGENT        claude, codex, gemini, or cursor: where the API key is, and the output format
+#   EVENT        start   a session starts: unread items go into the context of the agent
+#                prompt  the person sends a prompt: unread items go into the context
+#                stop    the agent is about to stop: unread items make it continue
+#                watch   Claude Code only, in the background: wait for an item, then wake the agent
+#   SERVER_NAME  the name of the MCP server in the configuration of the agent (default: tasks)
+#
+# The script uses sh, curl, and awk, which are the tools of the installer. It does not use python3
+# or jq, because no agent brings them. curl gets the API key through stdin, and the script prints
+# the key nowhere. When the server does not answer, the script prints nothing and exits 0.
+#
+# Environment, for a self-hosted server and for the tests:
+#   RELAYDECK_URL           the server, for example http://localhost:8000
+#   RELAYDECK_HOOK_TIMEOUT  seconds for one request (default 5)
+#   RELAYDECK_HOOK_WAIT     seconds that "watch" holds one request open (default 50)
+#   RELAYDECK_HOOK_PAUSE    seconds that "watch" waits after a request that failed (default 30)
+
+set -u
+umask 077
+
+VERSION=1.1.0
+DEFAULT_BASE="https://relaydeck.onrender.com"
+LIMIT=5
+WATCH_MINUTES=480
+AGENT=${1:-}
+EVENT=${2:-}
+SERVER=${3:-tasks}
+NL='
+'
+
+# Prints one line for each scalar of a JSON text: PATH, TYPE, VALUE, with a tab between them.
+# TYPE is "s" for a string and "v" for a number, true, false, or null. A string keeps its JSON
+# escapes. The reader also accepts comments and trailing commas, which some agents permit.
+# It prints nothing for a text that is cut off or is not JSON.
+# shellcheck disable=SC2016  # an awk program: $0 and $1 are awk fields
+JSON_FLAT='
+function emit(type, value,    i, path) {
+    path = ""
+    for (i = 1; i <= depth; i++) path = path (i > 1 ? "." : "") name[i]
+    gsub(/[\t\r\n]/, " ", value)
+    lines = lines path "\t" type "\t" value "\n"
+}
+{ text = text $0 "\n" }
+END {
+    depth = 0
+    for (;;) {
+        if (match(text, /^[ \t\r\n]+/)) text = substr(text, RLENGTH + 1)
+        if (text == "") break
+        c = substr(text, 1, 1)
+        if (c == "\"") {
+            if (!match(text, /^"([^"\\]|\\.)*"/)) break
+            token = substr(text, 2, RLENGTH - 2)
+            text = substr(text, RLENGTH + 1)
+            if (depth > 0 && kind[depth] == "o" && key[depth]) {
+                name[depth] = token
+                key[depth] = 0
+            } else emit("s", token)
+        } else if (c == "{" || c == "[") {
+            depth++
+            kind[depth] = (c == "{") ? "o" : "a"
+            key[depth] = (c == "{")
+            name[depth] = (c == "{") ? "" : 0
+            text = substr(text, 2)
+        } else if (c == "}" || c == "]") {
+            if (depth > 0) depth--
+            text = substr(text, 2)
+        } else if (c == ",") {
+            if (depth > 0 && kind[depth] == "o") key[depth] = 1
+            else if (depth > 0) name[depth]++
+            text = substr(text, 2)
+        } else if (c == ":") {
+            text = substr(text, 2)
+        } else if (substr(text, 1, 2) == "//") {
+            i = index(text, "\n")
+            if (!i) break
+            text = substr(text, i + 1)
+        } else if (substr(text, 1, 2) == "/*") {
+            i = index(text, "*/")
+            if (!i) break
+            text = substr(text, i + 2)
+        } else if (match(text, /^(-?[0-9][-+0-9.eE]*|true|false|null)/)) {
+            emit("v", substr(text, 1, RLENGTH))
+            text = substr(text, RLENGTH + 1)
+        } else break
+    }
+    if (text == "" && depth == 0) printf "%s", lines
+}'
+
+# Reads the lines of JSON_FLAT for an inbox answer. Prints the IDs of the items on line 1, then the
+# text for the agent. With json=1, the text is the content of a JSON string on one line.
+# The text of an item stays a JSON string, so an item can not start a line that looks like a
+# different item. "skip" holds the IDs that the agent got last time.
+# shellcheck disable=SC2016  # an awk program: $0 and $1 are awk fields
+INBOX_TEXT='
+function escaped(s,    out) {
+    out = ""
+    while (match(s, /["\\]/)) {
+        out = out substr(s, 1, RSTART - 1) "\\" substr(s, RSTART, 1)
+        s = substr(s, RSTART + 1)
+    }
+    return out s
+}
+function quoted(raw) { return json ? "\\\"" escaped(raw) "\\\"" : "\"" raw "\"" }
+function safe(raw) { return (raw ~ /^[A-Za-z0-9_-]+$/) ? raw : "" }
+BEGIN {
+    FS = "\t"
+    nl = json ? "\\n" : "\n"
+    count = split(skip, old, " ")
+    for (i = 1; i <= count; i++) seen[old[i]] = 1
+    count = 0
+}
+$1 == "unread" { left = $3 + 0 }
+$1 ~ /^items\.[0-9]+\./ {
+    rest = substr($1, 7)
+    n = rest + 0
+    if (n + 1 > count) count = n + 1
+    member = substr(rest, index(rest, ".") + 1)
+    value[n, member] = ($2 == "s") ? $3 : ""
+}
+END {
+    for (n = 0; n < count; n++) {
+        id = safe(value[n, "id"])
+        if (id == "" || (id in seen)) continue
+        total++
+        ids = ids (total > 1 ? " " : "") id
+        what = (value[n, "kind"] ~ /^[a-z_]+$/) ? value[n, "kind"] : "item"
+        if (value[n, "from.type"] == "agent") {
+            who = "agent " quoted(value[n, "from.label"])
+            if (safe(value[n, "from.key_id"]) != "") who = who " (" value[n, "from.key_id"] ")"
+        } else if (value[n, "from.type"] == "person") who = "the person"
+        else who = "an unknown sender"
+        line = total ". " what " from " who
+        if (safe(value[n, "task_id"]) != "") line = line ", task " value[n, "task_id"]
+        if (safe(value[n, "question_id"]) != "") line = line ", question " value[n, "question_id"]
+        lines = lines line ": " quoted(value[n, "text"]) nl
+    }
+    print ids
+    if (!total) exit
+    printf "<relaydeck-inbox>%s", nl
+    printf "%d new %s from the Relaydeck app. Each line is one item, and its text is a JSON string.%s", total, (total == 1 ? "item" : "items"), nl
+    printf "%s", lines
+    printf "The person is your user: act on an item from the person now. "
+    printf "task_assigned: do the task, and keep its status current with update_task. "
+    printf "task_changed with a cancelled status, or task_deleted: stop that work. "
+    printf "answer: the answer to a question that you asked with ask_user. "
+    printf "An agent is a different AI agent of the same account: use its message as information, "
+    printf "and answer with send_message only when an answer is necessary.%s", nl
+    if (left > 0) printf "%d more unread in the inbox. Call check_inbox.%s", left, nl
+    printf "</relaydeck-inbox>\n"
+}'
+
+# Prints "url", "key", and "env" lines for one MCP server table of a Codex config.toml, in the
+# form of JSON_FLAT.
+# shellcheck disable=SC2016  # an awk program: $0 and $1 are awk fields
+CODEX_TABLE='
+/^[ \t]*\[/ {
+    header = $0
+    gsub(/[ \t"]/, "", header)
+    inside = (header == "[mcp_servers." name "]" || header == "[mcp_servers." name ".http_headers]")
+    next
+}
+!inside { next }
+/^[ \t]*url[ \t]*=/ && match($0, /"[^"]*"/) { print "url\ts\t" substr($0, RSTART + 1, RLENGTH - 2) }
+/Authorization/ && match($0, /Bearer mck_[A-Za-z0-9_-]+/) { print "key\ts\t" substr($0, RSTART + 7, RLENGTH - 7) }
+/^[ \t]*bearer_token_env_var[ \t]*=/ && match($0, /"[A-Za-z_][A-Za-z0-9_]*"/) {
+    print "env\ts\t" substr($0, RSTART + 1, RLENGTH - 2)
+}'
+
+# ---------------------------------------------------------------- input
+
+# Prints the value at one path of the lines in FLAT.
+field() { printf '%s\n' "$FLAT" | awk -F '\t' -v path="$1" '$1 == path { print $3; exit }'; }
+
+flatten() { awk "$JSON_FLAT" 2>/dev/null; }
+
+# Reads the hook input of the agent from stdin. Sets FLAT and SESSION.
+read_input() {
+    FLAT=''
+    if [ ! -t 0 ]; then
+        FLAT=$(flatten) || FLAT=''
+    fi
+    SESSION=$(field session_id)
+    [ -n "$SESSION" ] || SESSION=$(field conversation_id)
+    SESSION=$(printf '%s' "$SESSION" | tr -cd 'A-Za-z0-9_-')
+    [ -n "$SESSION" ] || SESSION=none
+}
+
+# ---------------------------------------------------------------- the API key and the server
+
+valid_key() {
+    case $1 in mck_?*) ;; *) return 1 ;; esac
+    case $1 in *[!A-Za-z0-9_-]*) return 1 ;; esac
+    [ "${#1}" -le 128 ]
+}
+
+valid_url() {
+    case $1 in http://?* | https://?*) ;; *) return 1 ;; esac
+    case $1 in *[!A-Za-z0-9:/._~%@+,-]*) return 1 ;; esac
+    return 0
+}
+
+# Reads the key and the URL of the MCP server from a JSON configuration file: FILE URL_MEMBER.
+read_json_config() {
+    [ -r "$1" ] || return 0
+    FLAT=$(flatten <"$1") || return 0
+    KEY=$(field "mcpServers.$SERVER.headers.Authorization")
+    KEY=${KEY#Bearer }
+    MCP_URL=$(field "mcpServers.$SERVER.$2")
+}
+
+read_codex_config() {
+    rc_file=${CODEX_HOME:-$HOME/.codex}/config.toml
+    rc_table=''
+    if [ -r "$rc_file" ]; then
+        rc_table=$(awk -v name="$SERVER" "$CODEX_TABLE" "$rc_file" 2>/dev/null) || rc_table=''
+    fi
+    FLAT=$rc_table
+    KEY=$(field key)
+    MCP_URL=$(field url)
+    rc_env=$(field env)
+    if [ -z "$KEY" ]; then
+        # The Codex plugin names an environment variable for the key.
+        KEY=$(printenv "${rc_env:-TASKS_API_KEY}" 2>/dev/null) || KEY=''
+    fi
+}
+
+# Sets KEY and BASE. Each agent keeps its own key, because each key has its own inbox.
+find_server() {
+    KEY='' MCP_URL=''
+    case $AGENT in
+        claude) KEY=${CLAUDE_PLUGIN_OPTION_API_KEY:-} ;;
+        codex) read_codex_config ;;
+        gemini) read_json_config "$HOME/.gemini/settings.json" httpUrl ;;
+        cursor) read_json_config "$HOME/.cursor/mcp.json" url ;;
+    esac
+    FLAT=''
+    valid_key "$KEY" || return 1
+    BASE=${RELAYDECK_URL:-${MCP_URL:-$DEFAULT_BASE}}
+    BASE=${BASE%/}
+    BASE=${BASE%/mcp}
+    valid_url "$BASE"
+}
+
+# request PATH SECONDS: sets CODE and BODY. CODE is 000 when there is no answer.
+request() {
+    rq_out=$(printf 'header = "Authorization: Bearer %s"\n' "$KEY" |
+        curl -sS -K - -A "relaydeck-hook/$VERSION ($AGENT)" -H 'Accept: application/json' \
+            --connect-timeout 3 --max-time "$2" -w '\n%{http_code}' "$BASE$1" 2>/dev/null) || rq_out=''
+    CODE=000 BODY=''
+    case $rq_out in
+        *"$NL"*)
+            CODE=${rq_out##*"$NL"}
+            BODY=${rq_out%"$NL"*}
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------- the items
+
+# The script keeps the IDs of the items that a session got at a stop or at a wake, so the same
+# item never continues the agent two times. One line holds the IDs of one answer. 40 lines hold
+# 200 IDs, and an inbox has no more unread items than that.
+open_state() {
+    mkdir -p "$STATE" 2>/dev/null || return 1
+    SENT=$STATE/$SESSION.sent
+    : >>"$SENT" 2>/dev/null
+}
+
+sent_before() { tr '\n' ' ' <"$SENT" 2>/dev/null | tr -cd 'A-Za-z0-9_ -'; }
+
+remember_sent() {
+    {
+        tail -n 39 "$SENT"
+        printf '%s\n' "$IDS"
+    } >"$SENT.new" 2>/dev/null && mv -f "$SENT.new" "$SENT" 2>/dev/null
+}
+
+# collect JSON SKIP: reads unread items, which marks them read. Sets IDS and BLOCK.
+# Fails when there is no new item.
+collect() {
+    request "/v1/inbox?limit=$LIMIT" "$TIMEOUT"
+    [ "$CODE" = 200 ] || return 1
+    co_out=$(printf '%s\n' "$BODY" | flatten | awk -v json="$1" -v skip="$2" "$INBOX_TEXT" 2>/dev/null) || return 1
+    case $co_out in *"$NL"*) ;; *) return 1 ;; esac
+    IDS=${co_out%%"$NL"*}
+    BLOCK=${co_out#*"$NL"}
+    [ -n "$IDS" ]
+}
+
+context() { printf '{"hookSpecificOutput":{"hookEventName":"%s","additionalContext":"%s"}}\n' "$1" "$BLOCK"; }
+
+# ---------------------------------------------------------------- events
+
+run_context() {
+    collect 1 '' || exit 0
+    case $AGENT:$EVENT in
+        cursor:start) printf '{"additional_context":"%s"}\n' "$BLOCK" ;;
+        gemini:prompt) context BeforeAgent ;;
+        *:start) context SessionStart ;;
+        *) context UserPromptSubmit ;;
+    esac
+}
+
+run_stop() {
+    read_input
+    # The agent says when a stop hook already made it continue. Then it can stop.
+    [ "$(field stop_hook_active)" != true ] || exit 0
+    case $(field loop_count) in '' | 0) ;; *) exit 0 ;; esac
+    # Cursor also calls the hook when the person stops the agent.
+    case $(field status) in '' | completed) ;; *) exit 0 ;; esac
+    open_state || exit 0
+    collect 1 "$(sent_before)" || exit 0
+    remember_sent
+    case $AGENT in
+        claude) context Stop ;;
+        cursor) printf '{"followup_message":"%s"}\n' "$BLOCK" ;;
+        *) printf '{"decision":"block","reason":"%s"}\n' "$BLOCK" ;;
+    esac
+}
+
+parent_of() { ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '; }
+
+# False when a newer watch has the session, or when the process that started this watch is gone.
+still_wanted() {
+    [ "$(cat "$LOCK" 2>/dev/null)" = "$$" ] || return 1
+    kill -0 "$PARENT" 2>/dev/null || return 1
+    [ "$(parent_of "$PARENT")" = "$GRANDPARENT" ] || return 1
+    case ${CLAUDE_PID:-} in '' | *[!0-9]*) return 0 ;; esac
+    kill -0 "$CLAUDE_PID" 2>/dev/null
+}
+
+# Claude Code starts this in the background (asyncRewake). The text on stderr goes to the agent
+# when the script exits with code 2. The watch looks at the inbox without a change to it, and it
+# marks the items read only when it is sure that the session still runs.
+run_watch() {
+    # Claude Code marks a session that a person attends. A run with "claude -p" ends after its
+    # stop, so there is no agent to wake, and a watch there could take an item that nobody gets.
+    case ${CLAUDE_CODE_SESSION_ATTENDED:-${CLAUDE_CODE_ENTRYPOINT:-}} in 1 | cli) ;; *) exit 0 ;; esac
+    wt_minutes=${CLAUDE_PLUGIN_OPTION_IDLE_WATCH_MINUTES:-$WATCH_MINUTES}
+    case $wt_minutes in '' | *[!0-9]*) wt_minutes=$WATCH_MINUTES ;; esac
+    [ "$wt_minutes" -gt 0 ] || exit 0
+    read_input
+    open_state || exit 0
+    LOCK=$STATE/$SESSION.watch
+    PARENT=$PPID
+    GRANDPARENT=$(parent_of "$PARENT")
+    printf '%s\n' "$$" >"$LOCK" 2>/dev/null || exit 0
+    # The hook for the same event reads the inbox first.
+    sleep 1
+    wt_end=$(($(date +%s) + wt_minutes * 60))
+    wt_fast=5
+    [ "$WAIT" -ge "$wt_fast" ] || wt_fast=$WAIT
+    while [ "$(date +%s)" -lt "$wt_end" ]; do
+        still_wanted || exit 0
+        wt_start=$(date +%s)
+        request "/v1/inbox?wait=$WAIT&limit=1&mark_read=false" $((WAIT + 10))
+        still_wanted || exit 0
+        case $CODE in
+            200)
+                case $(printf '%s\n' "$BODY" | flatten) in
+                    *items.0.id*)
+                        if collect 0 "$(sent_before)"; then
+                            remember_sent
+                            rm -f "$LOCK"
+                            printf '%s\n' "$BLOCK" >&2
+                            exit "$WAKE"
+                        fi
+                        ;;
+                esac
+                ;;
+            401 | 403) exit 0 ;;
+        esac
+        # An answer that comes fast and brings no new item is a fault. Do not ask again at once.
+        if [ $(($(date +%s) - wt_start)) -lt "$wt_fast" ]; then
+            sleep "$PAUSE"
+        fi
+    done
+    exit 0
+}
+
+# Removes the state of sessions that ended.
+prune_state() {
+    [ -d "$STATE" ] || return 0
+    find "$STATE" -type f \( -name '*.sent' -o -name '*.sent.new' -o -name '*.watch' \) -mtime +7 \
+        -exec rm -f {} + 2>/dev/null
+}
+
+seconds() {
+    case $1 in '' | *[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac
+}
+
+main() {
+    case $AGENT:$EVENT in
+        claude:start | claude:prompt | claude:stop | claude:watch) ;;
+        codex:start | codex:prompt | codex:stop) ;;
+        gemini:start | gemini:prompt | gemini:stop) ;;
+        cursor:start | cursor:stop) ;;
+        *) exit 0 ;;
+    esac
+    case $SERVER in '' | *[!A-Za-z0-9_-]*) exit 0 ;; esac
+    command -v curl >/dev/null 2>&1 || exit 0
+    command -v awk >/dev/null 2>&1 || exit 0
+    TIMEOUT=$(seconds "${RELAYDECK_HOOK_TIMEOUT:-}" 5)
+    WAIT=$(seconds "${RELAYDECK_HOOK_WAIT:-}" 50)
+    PAUSE=$(seconds "${RELAYDECK_HOOK_PAUSE:-}" 30)
+    find_server || exit 0
+    STATE=${CLAUDE_PLUGIN_DATA:-${PLUGIN_DATA:-${XDG_STATE_HOME:-$HOME/.local/state}/relaydeck}}
+    case $EVENT in
+        start)
+            prune_state
+            run_context
+            ;;
+        prompt) run_context ;;
+        stop) run_stop ;;
+        watch) run_watch ;;
+    esac
+    exit 0
+}
+
+# Some shells give exit code 2 for an error in a script, and an agent reads that code from a hook
+# as "block". Thus the work runs in a subshell, and only a watch that has items gives a code that
+# is not 0.
+WAKE=42
+(main)
+[ "$?" != "$WAKE" ] || exit 2
+exit 0
+RELAYDECK_HOOK_SCRIPT
+}
+
 # ---------------------------------------------------------------- Claude Code
 #
 # For the hosted server, the installer uses the Relaydeck plugin: Claude Code keeps the key in its
-# secure storage, and the key goes in through stdin. For a different URL or name, the installer
-# uses "claude mcp add", which keeps the header in the Claude Code user settings.
+# secure storage, and the key goes in through stdin. The plugin also has the inbox hooks. For a
+# different URL or name, the installer uses "claude mcp add", which keeps the header in the Claude
+# Code user settings and has no hooks.
 
 detect_claude() { has_cmd claude; }
 
@@ -881,7 +1579,7 @@ claude_plugin_install() {
         if [ "$cp_have" = 1 ]; then
             finish plan "would save the API key again for the plugin $PLUGIN_ID"
         else
-            finish plan "would install the plugin $PLUGIN_ID from $PLUGIN_REPO and save the API key in secure storage"
+            finish plan "would install the plugin $PLUGIN_ID from $PLUGIN_REPO, with the inbox hooks, and save the API key in secure storage"
         fi
         return 0
     fi
@@ -894,6 +1592,10 @@ claude_plugin_install() {
             finish fail "could not install the plugin $PLUGIN_ID."
             return 0
         fi
+    else
+        # An earlier version of the plugin has no inbox hooks.
+        claude plugin marketplace update "$PLUGIN_MARKETPLACE" >/dev/null 2>&1 </dev/null || true
+        claude plugin update "$PLUGIN_ID" --scope user >/dev/null 2>&1 </dev/null || true
     fi
     if ! printf '{"api_key":"%s"}\n' "$KEY" | claude plugin configure "$PLUGIN_ID" --values-stdin >"$LOG" 2>&1; then
         finish fail "the plugin is installed, but Claude Code could not save the API key. In Claude Code, run: /plugin configure $PLUGIN_ID"
@@ -903,8 +1605,18 @@ claude_plugin_install() {
         # Claude Code does not show a stored key, so the installer cannot compare. It saves the key again.
         finish same "the plugin $PLUGIN_ID is already installed. Saved the API key again."
     else
-        finish changed "installed the plugin $PLUGIN_ID. Saved the API key in secure storage."
+        finish changed "installed the plugin $PLUGIN_ID with the inbox hooks. Saved the API key in secure storage."
     fi
+    hooked
+}
+
+claude_connected() {
+    if claude_uses_plugin && claude_has_plugin; then
+        return 0
+    fi
+    claude_mcp_state
+    case $CLAUDE_STATE in same | stale) return 0 ;; esac
+    return 1
 }
 
 # Sets CLAUDE_STATE for a server in the user settings: absent, same, stale, or foreign.
@@ -988,6 +1700,10 @@ claude_uninstall() {
 # "codex mcp add" can only name an environment variable for the token, and that needs a line in a
 # shell profile. A stored header (http_headers) works in each new terminal and in the Codex app,
 # so the installer adds this table to config.toml. The codex command reads and removes the entry.
+#
+# For the hosted server, the installer also installs the Relaydeck plugin, which has the inbox
+# hooks. The hook script reads the key from the table. Codex runs the hooks of a plugin only after
+# the person trusts them with /hooks.
 
 detect_codex() { has_cmd codex; }
 
@@ -1047,8 +1763,49 @@ codex_append() {
     commit_file "$ca_file" "$WORK/out"
 }
 
+codex_uses_plugin() { [ "$URL" = "$PLUGIN_URL" ] && [ "$NAME" = "$PLUGIN_NAME" ]; }
+
+codex_has_plugin() { output_has "\"pluginId\":\"$PLUGIN_ID\"" codex plugin list --json; }
+
+codex_connected() {
+    codex_state
+    case $CODEX_STATE in same | stale) return 0 ;; esac
+    return 1
+}
+
 codex_install() {
     need_cli codex || return 0
+    codex_table_install
+    codex_plugin_install
+}
+
+codex_plugin_install() {
+    codex_uses_plugin && [ "$R_STATE" != fail ] || return 0
+    if codex_has_plugin; then
+        # An earlier version of the plugin has no inbox hooks.
+        if [ "$DRY_RUN" = 0 ]; then
+            codex plugin marketplace upgrade "$PLUGIN_MARKETPLACE" >/dev/null 2>&1 </dev/null || true
+            codex plugin add "$PLUGIN_ID" >/dev/null 2>&1 </dev/null || true
+        fi
+    elif [ "$DRY_RUN" = 1 ]; then
+        if [ "$R_STATE" = same ]; then
+            finish plan "would install the plugin $PLUGIN_ID for the inbox hooks"
+        else
+            R_TEXT="$R_TEXT, and install the plugin $PLUGIN_ID for the inbox hooks"
+        fi
+        return 0
+    elif ! codex plugin marketplace add "$PLUGIN_REPO" >"$LOG" 2>&1 </dev/null ||
+        ! codex plugin add "$PLUGIN_ID" >"$LOG" 2>&1 </dev/null; then
+        add_note "The plugin $PLUGIN_ID for the inbox hooks was not installed."
+        return 0
+    else
+        add_note "Installed the plugin $PLUGIN_ID for the inbox hooks."
+        R_STATE=changed
+    fi
+    CODEX_TRUST=1
+}
+
+codex_table_install() {
     ci_file=$(codex_config)
     ci_where=$(tilde "$ci_file")
     codex_state
@@ -1098,6 +1855,36 @@ codex_install() {
 
 codex_uninstall() {
     need_cli codex || return 0
+    codex_table_uninstall
+    codex_plugin_uninstall
+}
+
+codex_plugin_uninstall() {
+    codex_uses_plugin && [ "$R_STATE" != fail ] || return 0
+    cp_removed=''
+    if codex_has_plugin; then
+        if [ "$DRY_RUN" = 0 ] && ! codex plugin remove "$PLUGIN_ID" >"$LOG" 2>&1 </dev/null; then
+            add_note "Could not remove the plugin $PLUGIN_ID."
+            return 0
+        fi
+        cp_removed="the plugin $PLUGIN_ID"
+    fi
+    if output_has "\"name\":\"$PLUGIN_MARKETPLACE\"" codex plugin marketplace list --json; then
+        if [ "$DRY_RUN" = 0 ] && ! codex plugin marketplace remove "$PLUGIN_MARKETPLACE" >"$LOG" 2>&1 </dev/null; then
+            add_note "Could not remove the plugin marketplace $PLUGIN_MARKETPLACE."
+            return 0
+        fi
+        cp_removed="${cp_removed:+$cp_removed and }the marketplace $PLUGIN_MARKETPLACE"
+    fi
+    [ -n "$cp_removed" ] || return 0
+    case $DRY_RUN:$R_STATE in
+        1:same) finish plan "would remove $cp_removed" ;;
+        0:same) finish changed "removed $cp_removed" ;;
+        *) R_TEXT="$R_TEXT, and $cp_removed" ;;
+    esac
+}
+
+codex_table_uninstall() {
     cu_where=$(tilde "$(codex_config)")
     codex_state
     if [ "$CODEX_STATE" = broken ]; then
@@ -1118,26 +1905,68 @@ codex_uninstall() {
 
 # ---------------------------------------------------------------- Cursor
 
+#
+# Cursor starts a hook of the user in ~/.cursor, so the hook command has a relative path. Cursor
+# has no hook that adds context to a prompt, thus the hooks are for the session start and the stop.
+
 detect_cursor() { has_cmd cursor || has_cmd cursor-agent || [ -d "$HOME/.cursor" ]; }
+
+cursor_connected() { json_connected "$HOME/.cursor/mcp.json" mcpServers url; }
+
+# shellcheck disable=SC2016  # the shell of the hook reads $f, not this script
+cursor_hook() {
+    printf '{"command":"f=./hooks/%s; if [ -r \\"$f\\" ]; then sh \\"$f\\" cursor %s %s; fi","timeout":10}' \
+        "$HOOK_FILE" "$1" "$NAME"
+}
+
+cursor_hooks() { HOOKS_JSON=$(printf '{"sessionStart":%s,"stop":%s}' "$(cursor_hook start)" "$(cursor_hook stop)"); }
 
 cursor_install() {
     json_install "$HOME/.cursor/mcp.json" mcpServers url "$(printf '{"url":"%s",%s}' "$URL" "$(auth_header)")"
+    cursor_hooks
+    hooks_install "$HOME/.cursor" "$HOME/.cursor/hooks.json" hooks "{$NL  \"version\": 1$NL}"
 }
 
-cursor_uninstall() { json_uninstall "$HOME/.cursor/mcp.json" mcpServers url; }
+cursor_uninstall() {
+    json_uninstall "$HOME/.cursor/mcp.json" mcpServers url
+    cursor_hooks
+    hooks_uninstall "$HOME/.cursor" "$HOME/.cursor/hooks.json" hooks
+}
 
 # ---------------------------------------------------------------- Gemini CLI
 #
 # "gemini mcp add" accepts a header only as an argument, so the installer writes the settings file.
+# The hooks are in the same file. Gemini CLI gives a hook timeout in milliseconds.
 
 detect_gemini() { has_cmd gemini || [ -d "$HOME/.gemini" ]; }
+
+gemini_connected() { json_connected "$HOME/.gemini/settings.json" mcpServers httpUrl; }
+
+# shellcheck disable=SC2016  # the shell of the hook reads $HOME and $f, not this script
+gemini_hook() {
+    gh_start='f=\"$HOME/.gemini/hooks/'
+    gh_end='\"; if [ -r \"$f\" ]; then sh \"$f\" gemini'
+    printf '{"hooks":[{"name":"relaydeck-inbox","type":"command","command":"%s%s%s %s %s; fi","timeout":10000}]}' \
+        "$gh_start" "$HOOK_FILE" "$gh_end" "$1" "$NAME"
+}
+
+gemini_hooks() {
+    HOOKS_JSON=$(printf '{"SessionStart":%s,"BeforeAgent":%s,"AfterAgent":%s}' \
+        "$(gemini_hook start)" "$(gemini_hook prompt)" "$(gemini_hook stop)")
+}
 
 gemini_install() {
     json_install "$HOME/.gemini/settings.json" mcpServers httpUrl \
         "$(printf '{"httpUrl":"%s",%s}' "$URL" "$(auth_header)")"
+    gemini_hooks
+    hooks_install "$HOME/.gemini" "$HOME/.gemini/settings.json" hooks '{}'
 }
 
-gemini_uninstall() { json_uninstall "$HOME/.gemini/settings.json" mcpServers httpUrl; }
+gemini_uninstall() {
+    json_uninstall "$HOME/.gemini/settings.json" mcpServers httpUrl
+    gemini_hooks
+    hooks_uninstall "$HOME/.gemini" "$HOME/.gemini/settings.json" hooks
+}
 
 # ---------------------------------------------------------------- opencode
 
@@ -1152,6 +1981,8 @@ opencode_config() {
 }
 
 detect_opencode() { has_cmd opencode || [ -d "$(opencode_dir)" ]; }
+
+opencode_connected() { json_connected "$(opencode_config)" mcp url; }
 
 opencode_install() {
     json_install "$(opencode_config)" mcp url \
@@ -1179,6 +2010,108 @@ zed_install() {
 
 zed_uninstall() { json_uninstall "$(zed_settings)" context_servers url; }
 
+zed_connected() { json_connected "$(zed_settings)" context_servers url; }
+
+# ---------------------------------------------------------------- GitHub Copilot CLI
+#
+# VS Code reads the same file for its agent sessions.
+
+copilot_config() { printf '%s\n' "${COPILOT_HOME:-$HOME/.copilot}/mcp-config.json"; }
+
+detect_copilot() { has_cmd copilot || [ -d "$(dirname "$(copilot_config)")" ]; }
+
+copilot_install() {
+    json_install "$(copilot_config)" mcpServers url \
+        "$(printf '{"type":"http","url":"%s",%s,"tools":["*"]}' "$URL" "$(auth_header)")"
+}
+
+copilot_uninstall() { json_uninstall "$(copilot_config)" mcpServers url; }
+
+copilot_connected() { json_connected "$(copilot_config)" mcpServers url; }
+
+# ---------------------------------------------------------------- Antigravity
+#
+# Antigravity keeps its files in the folder of Gemini CLI. It accepts only "serverUrl" for a remote server.
+
+antigravity_config() { printf '%s\n' "$HOME/.gemini/config/mcp_config.json"; }
+
+detect_antigravity() { has_cmd antigravity || [ -d "$HOME/.gemini/config" ] || [ -d "$HOME/.gemini/antigravity" ]; }
+
+antigravity_install() {
+    json_install "$(antigravity_config)" mcpServers serverUrl \
+        "$(printf '{"serverUrl":"%s",%s}' "$URL" "$(auth_header)")"
+}
+
+antigravity_uninstall() { json_uninstall "$(antigravity_config)" mcpServers serverUrl; }
+
+antigravity_connected() { json_connected "$(antigravity_config)" mcpServers serverUrl; }
+
+# ---------------------------------------------------------------- Kiro
+
+kiro_config() { printf '%s\n' "$HOME/.kiro/settings/mcp.json"; }
+
+detect_kiro() { has_cmd kiro || has_cmd kiro-cli || [ -d "$HOME/.kiro" ]; }
+
+kiro_install() {
+    json_install "$(kiro_config)" mcpServers url "$(printf '{"url":"%s",%s}' "$URL" "$(auth_header)")"
+}
+
+kiro_uninstall() { json_uninstall "$(kiro_config)" mcpServers url; }
+
+kiro_connected() { json_connected "$(kiro_config)" mcpServers url; }
+
+# ---------------------------------------------------------------- Factory Droid
+#
+# "droid mcp add" accepts a header only as an argument, so the installer writes the file.
+
+droid_config() { printf '%s\n' "$HOME/.factory/mcp.json"; }
+
+detect_droid() { has_cmd droid || [ -d "$HOME/.factory" ]; }
+
+droid_install() {
+    json_install "$(droid_config)" mcpServers url \
+        "$(printf '{"type":"http","url":"%s",%s,"disabled":false}' "$URL" "$(auth_header)")"
+}
+
+droid_uninstall() { json_uninstall "$(droid_config)" mcpServers url; }
+
+droid_connected() { json_connected "$(droid_config)" mcpServers url; }
+
+# ---------------------------------------------------------------- Cline
+#
+# Without "type", Cline uses the earlier SSE transport.
+
+cline_config() {
+    printf '%s\n' "${CLINE_MCP_SETTINGS_PATH:-$HOME/.cline/data/settings/cline_mcp_settings.json}"
+}
+
+detect_cline() { has_cmd cline || [ -d "$HOME/.cline" ]; }
+
+cline_install() {
+    json_install "$(cline_config)" mcpServers url \
+        "$(printf '{"type":"streamableHttp","url":"%s",%s,"disabled":false,"autoApprove":[]}' "$URL" "$(auth_header)")"
+}
+
+cline_uninstall() { json_uninstall "$(cline_config)" mcpServers url; }
+
+cline_connected() { json_connected "$(cline_config)" mcpServers url; }
+
+# ---------------------------------------------------------------- Amp
+#
+# "amp mcp add" has no option for a header, so the installer writes the settings file.
+
+amp_config() { printf '%s\n' "$HOME/.config/amp/settings.json"; }
+
+detect_amp() { has_cmd amp || [ -d "$HOME/.config/amp" ]; }
+
+amp_install() {
+    json_install "$(amp_config)" amp.mcpServers url "$(printf '{"url":"%s",%s}' "$URL" "$(auth_header)")"
+}
+
+amp_uninstall() { json_uninstall "$(amp_config)" amp.mcpServers url; }
+
+amp_connected() { json_connected "$(amp_config)" amp.mcpServers url; }
+
 # ---------------------------------------------------------------- main
 
 check_platform() {
@@ -1203,10 +2136,11 @@ require_inputs() {
 }
 
 run_agents() {
-    CHANGED=0 FAILED=0
+    CHANGED=0 FAILED=0 HOOKED='' CODEX_TRUST=0
     say ""
     for AGENT in $AGENTS; do
         : >"$LOG"
+        WROTE=''
         finish fail "stopped before the end."
         "${AGENT}_${ACTION}" || true
         report
@@ -1221,6 +2155,20 @@ agents_count() {
     fi
 }
 
+next_steps() {
+    if [ -n "$HOOKED" ]; then
+        say "Inbox hooks are on for: $HOOKED. These agents get your tasks, answers, and messages from the app without a prompt."
+    fi
+    if [ "$CODEX_TRUST" = 1 ]; then
+        say "${YELLOW}Codex:${RESET} the inbox hooks are installed. Type /hooks in Codex one time and trust the Relaydeck hooks. Codex does not run them before that."
+    fi
+    say ""
+    say "${BOLD}What to try next${RESET}"
+    say "  1. Start a new session in each agent."
+    say "  2. Say to the agent: Create a task named \"Hello\", and ask me a question on my phone."
+    say "  3. Create a task for the agent in the Relaydeck app. The agent gets the task and starts the work."
+}
+
 summary() {
     say ""
     if [ "$DRY_RUN" = 1 ]; then
@@ -1229,7 +2177,7 @@ summary() {
         say "Removed Relaydeck from $(agents_count "$CHANGED")."
     elif [ "$CHANGED" -gt 0 ]; then
         say "${BOLD}Done.${RESET} $(agents_count "$CHANGED") can now use the server \"$NAME\" at $URL."
-        say "Start a new session in each agent. Then try: Create a task named \"Hello\", and ask me a question on my phone."
+        next_steps
     elif [ "$FAILED" = 0 ]; then
         say "Each agent was already set up."
     fi
@@ -1256,7 +2204,9 @@ main() {
     : >"$LOG"
     find_json_tool
 
-    say "${BOLD}Relaydeck installer${RESET}  ${DIM}$URL${RESET}"
+    say "${BOLD}Relaydeck installer${RESET}"
+    say "Connects your coding agents to the Relaydeck app on iPhone, iPad, and Apple Watch."
+    say "${DIM}Server: $URL${RESET}"
     choose_agents
     if [ -z "$AGENTS" ]; then
         say "No agent is selected. Nothing was changed."

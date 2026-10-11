@@ -1,7 +1,7 @@
 {
   "name": "relaydeck",
-  "version": "1.0.0",
-  "description": "Send tasks, progress, and push notifications from your agent to the Relaydeck app on iPhone, iPad, and Apple Watch.",
+  "version": "1.1.0",
+  "description": "Two-way tasks between your agent and the Relaydeck app on iPhone, iPad, and Apple Watch: the agent reports its work, and it gets your tasks, answers, and messages.",
   "author": {
     "name": "Aayush9029",
     "url": "https://github.com/Aayush9029"
@@ -17,10 +17,12 @@
       "bearer_token_env_var": "TASKS_API_KEY"
     }
   },
+  "skills": "./skills/",
+  "hooks": "./hooks/codex.json",
   "interface": {
     "displayName": "Relaydeck",
     "shortDescription": "Agent tasks on your iPhone",
-    "longDescription": "Relaydeck shows the tasks of your agent on iPhone, iPad, and Apple Watch. The agent creates tasks, reports progress, and sends a push notification when you must act. Each API key sees only its own tasks.",
+    "longDescription": "Relaydeck shows the tasks of your agent on iPhone, iPad, and Apple Watch. The agent creates tasks, reports progress, and sends a push notification when you must act. The agent also gets the tasks, answers, and messages that you send from the app. Each API key sees only its own tasks.",
     "developerName": "Aayush9029",
     "category": "Productivity",
     "capabilities": ["Read", "Write"],

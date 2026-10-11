@@ -10,7 +10,7 @@ Connect an AI agent to Relaydeck. After that, the tasks of the agent show on you
 
 ## Install the plugin
 
-The plugin adds the Relaydeck MCP server to the agent.
+The plugin adds the Relaydeck MCP server to the agent. It also adds hooks that give the agent your tasks, answers, and messages from the app without a prompt. See [Hooks](inbox.md#hooks).
 
 ### Claude Code
 
@@ -30,6 +30,8 @@ export TASKS_API_KEY=YOUR_API_KEY
 codex plugin marketplace add Aayush9029/mcp-server
 codex plugin add relaydeck@relaydeck
 ```
+
+Codex runs the hooks of a plugin only after you approve them. Type `/hooks` in Codex and trust the Relaydeck hooks.
 
 ## Configure MCP manually
 
@@ -72,6 +74,8 @@ A client that cannot send headers can use the URL `https://relaydeck.onrender.co
 Ask the agent: "Create a task for the database migration, keep its progress current, and ask me before you deploy."
 
 The agent uses the tools in [MCP](mcp.md). You see the task in the app, and you answer the question from the notification.
+
+Then make a task for the agent in the app. An agent with the hooks gets the task and starts the work.
 
 ## Use the REST API from a script
 

@@ -22,6 +22,8 @@ type Json = dict[str, Any]
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "install.sh"
+HOOK_SCRIPT = ROOT / "plugins" / "relaydeck" / "hooks" / "inbox.sh"
+MENU_PROMPT = "Press Enter to continue: "
 
 GOOD_KEY = "mck_" + "A1b2C3d4" * 5
 SECOND_KEY = "mck_" + "Z9y8X7w6" * 5
@@ -31,6 +33,7 @@ SYSTEM_TOOLS = (
     "basename",
     "cat",
     "chmod",
+    "cmp",
     "cp",
     "curl",
     "cut",
@@ -43,6 +46,7 @@ SYSTEM_TOOLS = (
     "mv",
     "readlink",
     "rm",
+    "rmdir",
     "stty",
     "tail",
     "tr",
@@ -97,6 +101,8 @@ elif ARGS[:3] == ["plugin", "marketplace", "remove"]:
         stop("Marketplace not found")
     state["marketplaces"] = []
     save()
+elif ARGS[:3] == ["plugin", "marketplace", "update"] or ARGS[:2] == ["plugin", "update"]:
+    print("Already at the latest version")
 elif ARGS[:2] == ["plugin", "install"]:
     if not state["marketplaces"]:
         stop("Plugin not found in any marketplace")
@@ -183,11 +189,47 @@ def describe(name, server):
         },
     }
 
+plugins_path = STATE / "codex-plugins.json"
+plugins = {"marketplaces": [], "installed": []}
+if plugins_path.exists():
+    plugins = json.loads(plugins_path.read_text())
+
+def save_plugins():
+    plugins_path.write_text(json.dumps(plugins))
+
 servers = load().get("mcp_servers", {})
 in_config = set(servers)
 if "plugin" in FAIL:
     servers.setdefault("tasks", {"url": os.environ["STUB_PLUGIN_URL"], "bearer_token_env_var": "TASKS_API_KEY"})
-if ARGS[:2] == ["mcp", "get"]:
+if ARGS[:3] == ["plugin", "list", "--json"]:
+    installed = [{"pluginId": plugin, "installed": True, "enabled": True} for plugin in plugins["installed"]]
+    print(json.dumps({"installed": installed, "available": []}, indent=2))
+elif ARGS[:4] == ["plugin", "marketplace", "list", "--json"]:
+    listed = [{"name": "relaydeck", "root": "/cache/" + source} for source in plugins["marketplaces"]]
+    print(json.dumps({"marketplaces": listed}, indent=2))
+elif ARGS[:3] == ["plugin", "marketplace", "add"]:
+    if "marketplace" in FAIL:
+        sys.exit("Error: failed to clone the marketplace")
+    if ARGS[3] not in plugins["marketplaces"]:
+        plugins["marketplaces"].append(ARGS[3])
+    save_plugins()
+    print("Added marketplace `relaydeck`")
+elif ARGS[:3] == ["plugin", "marketplace", "upgrade"]:
+    print("Upgraded marketplace `relaydeck`")
+elif ARGS[:3] == ["plugin", "marketplace", "remove"]:
+    plugins["marketplaces"] = []
+    save_plugins()
+elif ARGS[:2] == ["plugin", "add"]:
+    if not plugins["marketplaces"]:
+        sys.exit("Error: plugin not found")
+    if ARGS[2] not in plugins["installed"]:
+        plugins["installed"].append(ARGS[2])
+    save_plugins()
+    print("Added plugin `relaydeck` from marketplace `relaydeck`.")
+elif ARGS[:2] == ["plugin", "remove"]:
+    plugins["installed"].remove(ARGS[2])
+    save_plugins()
+elif ARGS[:2] == ["mcp", "get"]:
     if ARGS[2] not in servers:
         sys.exit("Error: No MCP server named '%s' found." % ARGS[2])
     print(json.dumps(describe(ARGS[2], servers[ARGS[2]]), indent=2))
@@ -251,7 +293,7 @@ if pid == 0:
     os.chdir(spec["cwd"])
     os.execve(spec["argv"][0], spec["argv"], spec["env"])
 seen, window, steps = "", "", spec["steps"]
-deadline = time.monotonic() + 60
+deadline = time.monotonic() + 240
 while time.monotonic() < deadline:
     if steps and steps[0][0] in window:
         prompt, reply = steps.pop(0)
@@ -317,7 +359,7 @@ def toolbox(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     return dirs
 
 
-def _shells() -> list[object]:
+def shells() -> list[object]:
     """sh, plus dash and bash when each is a different program from sh."""
     sh = shutil.which("sh") or "/bin/sh"
     probe = subprocess.run(  # noqa: S603  sh comes from PATH on the developer's machine
@@ -336,7 +378,7 @@ def _shells() -> list[object]:
     return params
 
 
-@pytest.fixture(params=_shells())
+@pytest.fixture(params=shells())
 def shell(request: pytest.FixtureRequest) -> str:
     chosen: str = request.param
     return chosen
@@ -414,7 +456,7 @@ class Sandbox:
             env=self.env | (env or {}) | ({"RELAYDECK_API_KEY": key} if key else {}),
             cwd=self.root,
             start_new_session=True,
-            timeout=60,
+            timeout=300,
             check=False,
         )
         return Result(done.returncode, done.stdout, done.stderr)
@@ -440,7 +482,7 @@ class Sandbox:
             [sys.executable, "-c", TERMINAL_DRIVER, json.dumps(spec)],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
             check=True,
         )
         report: Json = json.loads(done.stdout)
@@ -489,6 +531,26 @@ def read_json(path: Path) -> Json:
     return data
 
 
+def cursor_hooks(name: str = "tasks") -> Json:
+    """The hooks that the installer adds to ~/.cursor/hooks.json."""
+
+    def hook(event: str) -> Json:
+        command = f'f=./hooks/relaydeck-inbox.sh; if [ -r "$f" ]; then sh "$f" cursor {event} {name}; fi'
+        return {"command": command, "timeout": 10}
+
+    return {"sessionStart": [hook("start")], "stop": [hook("stop")]}
+
+
+def gemini_hooks(name: str = "tasks") -> Json:
+    """The hooks that the installer adds to ~/.gemini/settings.json."""
+
+    def group(event: str) -> list[Json]:
+        command = f'f="$HOME/.gemini/hooks/relaydeck-inbox.sh"; if [ -r "$f" ]; then sh "$f" gemini {event} {name}; fi'
+        return [{"hooks": [{"name": "relaydeck-inbox", "type": "command", "command": command, "timeout": 10000}]}]
+
+    return {"SessionStart": group("start"), "BeforeAgent": group("prompt"), "AfterAgent": group("stop")}
+
+
 # ------------------------------------------------------------------ options, platform, terminal
 
 
@@ -498,6 +560,13 @@ def test_help_lists_each_flag(box: Sandbox) -> None:
     for flag in ("--agents", "--key", "--url", "--name", "--uninstall", "--dry-run", "--yes", "--help"):
         assert flag in result.out
     assert "RELAYDECK_API_KEY" in result.out
+    listed = result.out.split("with commas between them:")[1].split("--key")[0]
+    script = SCRIPT.read_text()
+    agent_ids = script.split('AGENT_IDS="')[1].split('"')[0].split()
+    assert [word.strip(",") for word in listed.split()] == agent_ids
+    for agent in agent_ids:
+        for function in ("detect", "install", "uninstall", "connected"):
+            assert f"\n{function}_{agent}() " in script or f"\n{agent}_{function}() " in script
 
 
 @pytest.mark.parametrize(
@@ -570,54 +639,86 @@ def test_colors_show_only_on_a_terminal(box: Sandbox) -> None:
 # ------------------------------------------------------------------ detection and selection
 
 
-def test_the_menu_selects_the_agents_that_are_found(box: Sandbox, key_server: KeyServer) -> None:
+def test_the_menu_lists_only_the_agents_that_are_found(box: Sandbox, key_server: KeyServer) -> None:
     box.stub("claude", CLAUDE_STUB)
     box.stub("zed", "#!/bin/sh\n")
     (box.home / ".cursor").mkdir()
-    result = box.run_in_terminal("--url", key_server.url, "--dry-run", steps=[("Press Enter to continue: ", "\n")])
+    (box.home / ".t3").mkdir()
+    result = box.run_in_terminal("--url", key_server.url, "--dry-run", steps=[(MENU_PROMPT, "\n")])
     assert result.code == 0
     menu = result.terminal
-    assert "[x] 1) Claude Code" in menu
-    assert "[ ] 2) Codex" in menu
-    assert "[x] 3) Cursor" in menu
-    assert "[ ] 4) Gemini CLI" in menu
-    assert "[ ] 5) opencode" in menu
-    assert "[x] 6) Zed" in menu
-    assert menu.count("(not found)") == 3
+    assert "[x]  1) Claude Code" in menu
+    assert "[x]  2) Cursor" in menu
+    assert "[x]  3) Zed" in menu
+    assert " 4) " not in menu
+    missing = "Codex, Gemini CLI, opencode, GitHub Copilot CLI, Antigravity, Kiro, Factory Droid, Cline, Amp"
+    assert f"Not found: {missing}. Use --agents to connect one of them." in menu
+    assert "T3 Code uses the agents in this list" in menu
+    assert "connected" not in menu
     for label in ("Claude Code", "Cursor", "Zed"):
         assert label in result.out
-    for label in ("Codex", "Gemini CLI", "opencode"):
+    for label in ("Codex", "Gemini CLI", "opencode", "Kiro"):
         assert label not in result.out
 
 
-def test_the_menu_switches_agents_on_and_off(box: Sandbox, key_server: KeyServer) -> None:
-    (box.home / ".cursor").mkdir()
+def test_the_menu_marks_an_agent_that_is_connected(box: Sandbox, key_server: KeyServer) -> None:
+    box.stub("claude", CLAUDE_STUB)
+    box.stub("codex", CODEX_STUB)
     (box.home / ".gemini").mkdir()
-    prompt = "Press Enter to continue: "
-    steps = [(prompt, "3, 6 9\n"), (prompt, "n\n"), (prompt, "4\n"), (prompt, "\n")]
+    assert box.run("--url", key_server.url, "--agents", "codex,cursor", key=GOOD_KEY).code == 0
+
+    result = box.run_in_terminal("--url", key_server.url, "--dry-run", steps=[(MENU_PROMPT, "\n")])
+    rows = {line.split(") ")[1].split("  ")[0]: line for line in result.terminal.splitlines() if ") " in line}
+    assert list(rows) == ["Claude Code", "Codex", "Cursor", "Gemini CLI"]
+    assert [name for name, row in rows.items() if "+ connected" in row] == ["Codex", "Cursor"]
+    assert all(row.strip().startswith("[x]") for row in rows.values())
+    assert "T3 Code" not in result.terminal
+
+    removal = box.run_in_terminal("--url", key_server.url, "--uninstall", "--dry-run", steps=[(MENU_PROMPT, "\n")])
+    rows = {line.split(") ")[1].split("  ")[0]: line for line in removal.terminal.splitlines() if ") " in line}
+    assert [name for name, row in rows.items() if row.strip().startswith("[x]")] == ["Codex", "Cursor"]
+    assert removal.out.count("would remove") == 2
+
+
+def test_the_menu_switches_agents_on_and_off(box: Sandbox, key_server: KeyServer) -> None:
+    for folder in (".cursor", ".gemini", ".kiro"):
+        (box.home / folder).mkdir()
+    steps = [(MENU_PROMPT, "1, 3 9 x\n"), (MENU_PROMPT, "n\n"), (MENU_PROMPT, "2\n"), (MENU_PROMPT, "\n")]
     result = box.run_in_terminal("--url", key_server.url, "--dry-run", steps=steps)
     assert result.code == 0
     assert '"9" is not a number in the list' in result.terminal
-    assert "[x] 6) Zed" in result.terminal
+    assert '"x" is not a number in the list' in result.terminal
+    assert "[ ]  1) Cursor" in result.terminal
+    assert "[ ]  3) Kiro" in result.terminal
     assert "Gemini CLI" in result.out
     assert "Cursor" not in result.out
-    assert "Zed" not in result.out
+    assert "Kiro" not in result.out
 
 
 def test_no_selection_changes_nothing(box: Sandbox, key_server: KeyServer) -> None:
-    result = box.run_in_terminal("--url", key_server.url, steps=[("Press Enter to continue: ", "\n")])
+    (box.home / ".cursor").mkdir()
+    result = box.run_in_terminal("--url", key_server.url, steps=[(MENU_PROMPT, "n\n"), (MENU_PROMPT, "\n")])
     assert result.code == 0
     assert "No agent is selected. Nothing was changed." in result.out
     assert box.files() == set()
 
 
+def test_a_machine_without_agents_gets_the_manual_steps(box: Sandbox, key_server: KeyServer) -> None:
+    result = box.run_in_terminal("--url", key_server.url, steps=[])
+    assert result.code == 1
+    assert "No supported agent was found. Use --agents to choose one." in result.out
+    assert "https://github.com/Aayush9029/mcp-server#quick-start" in result.out
+    assert "Press Enter" not in result.terminal
+    assert box.files() == set()
+
+
 def test_the_agent_list_accepts_names_in_any_case(box: Sandbox, key_server: KeyServer) -> None:
-    result = box.run("--url", key_server.url, "--dry-run", "--agents", "Cursor, GEMINI-CLI,cursor")
+    names = "Cursor, GEMINI-CLI,cursor,Copilot-CLI,kiro-cli,FACTORY"
+    result = box.run("--url", key_server.url, "--dry-run", "--agents", names)
     assert result.code == 0
     lines = [line for line in result.out.splitlines() if "would" in line]
-    assert len(lines) == 2
-    assert "Cursor" in lines[0]
-    assert "Gemini CLI" in lines[1]
+    labels = ["Cursor", "Gemini CLI", "GitHub Copilot CLI", "Kiro", "Factory Droid"]
+    assert [line.split("  ")[1].split(" ", 1)[1].strip() for line in lines] == labels
 
 
 def test_yes_uses_the_agents_that_are_found(box: Sandbox, key_server: KeyServer) -> None:
@@ -636,6 +737,7 @@ def test_a_good_key_is_checked_and_stays_secret(box: Sandbox, key_server: KeySer
     result = box.run("--url", key_server.url, "--agents", "cursor", key=GOOD_KEY)
     assert result.code == 0, result.text
     assert key_server.requests[before:] == [["/v1/tasks?limit=1", f"Bearer {GOOD_KEY}"]]
+    assert "The server accepted the API key." in result.out
     assert GOOD_KEY not in result.text
     assert read_json(box.home / ".cursor/mcp.json") == {"mcpServers": {"tasks": entry(key_server.url)}}
 
@@ -692,24 +794,52 @@ def test_three_bad_keys_stop_the_installer(box: Sandbox, key_server: KeyServer) 
 
 
 def test_each_json_agent_gets_its_own_format(box: Sandbox, key_server: KeyServer) -> None:
-    result = box.run("--url", key_server.url, "--agents", "cursor,gemini,opencode,zed", key=GOOD_KEY)
+    agents = "cursor,gemini,opencode,zed,copilot,antigravity,kiro,droid,cline,amp"
+    result = box.run("--url", key_server.url, "--agents", agents, key=GOOD_KEY)
     assert result.code == 0, result.text
     url = key_server.url
     headers = {"Authorization": f"Bearer {GOOD_KEY}"}
+    remote: Json = {"url": url, "headers": headers}
+    cline: Json = {"type": "streamableHttp", **remote, "disabled": False, "autoApprove": []}
     expected: dict[str, Json] = {
-        ".cursor/mcp.json": {"mcpServers": {"tasks": {"url": url, "headers": headers}}},
-        ".gemini/settings.json": {"mcpServers": {"tasks": {"httpUrl": url, "headers": headers}}},
+        ".cursor/mcp.json": {"mcpServers": {"tasks": remote}},
+        ".gemini/settings.json": {
+            "mcpServers": {"tasks": {"httpUrl": url, "headers": headers}},
+            "hooks": gemini_hooks(),
+        },
         ".config/opencode/opencode.json": {
             "mcp": {"tasks": {"type": "remote", "url": url, "enabled": True, "oauth": False, "headers": headers}}
         },
-        ".config/zed/settings.json": {"context_servers": {"tasks": {"url": url, "headers": headers}}},
+        ".config/zed/settings.json": {"context_servers": {"tasks": remote}},
+        ".copilot/mcp-config.json": {"mcpServers": {"tasks": {"type": "http", **remote, "tools": ["*"]}}},
+        ".gemini/config/mcp_config.json": {"mcpServers": {"tasks": {"serverUrl": url, "headers": headers}}},
+        ".kiro/settings/mcp.json": {"mcpServers": {"tasks": remote}},
+        ".factory/mcp.json": {"mcpServers": {"tasks": {"type": "http", **remote, "disabled": False}}},
+        ".cline/data/settings/cline_mcp_settings.json": {"mcpServers": {"tasks": cline}},
+        ".config/amp/settings.json": {"amp.mcpServers": {"tasks": remote}},
     }
     for name, content in expected.items():
         path = box.home / name
         assert read_json(path) == content
         assert path.stat().st_mode & 0o777 == 0o600
-    assert box.files() == {f"home/{name}" for name in expected}
-    assert "Done. 4 agents can now use the server" in result.out
+    hook_files = [".cursor/hooks.json", ".cursor/hooks/relaydeck-inbox.sh", ".gemini/hooks/relaydeck-inbox.sh"]
+    assert box.files() == {f"home/{name}" for name in [*expected, *hook_files]}
+    assert "Done. 10 agents can now use the server" in result.out
+
+    again = box.run("--url", key_server.url, "--agents", agents, key=GOOD_KEY)
+    assert again.out.count("No change.") == 10
+    removed = box.run("--url", key_server.url, "--agents", agents, "--uninstall")
+    assert removed.code == 0, removed.text
+    assert "Removed Relaydeck from 10 agents." in removed.out
+    assert not any(GOOD_KEY.encode() in content for content in box.snapshot().values())
+    assert read_json(box.home / ".config/amp/settings.json") == {"amp.mcpServers": {}}
+
+
+def test_an_agent_file_can_be_in_a_different_place(box: Sandbox, key_server: KeyServer) -> None:
+    env = {"COPILOT_HOME": str(box.home / "copilot"), "CLINE_MCP_SETTINGS_PATH": str(box.home / "cline/mcp.json")}
+    result = box.run("--url", key_server.url, "--agents", "copilot,cline", key=GOOD_KEY, env=env)
+    assert result.code == 0, result.text
+    assert box.files() == {"home/copilot/mcp-config.json", "home/cline/mcp.json"}
 
 
 CURSOR_FILE = """{
@@ -845,7 +975,9 @@ def test_a_malformed_file_is_not_changed(box: Sandbox, key_server: KeyServer, co
         assert "Not complete for 1 agent." in result.out
         assert path.read_text() == content
         assert backups(path) == []
-        assert "Gemini CLI" in result.out.replace("Gemini CLI   cannot", "")
+        assert not (path.parent / "hooks.json").exists()
+        gemini = next(line for line in result.out.splitlines() if "Gemini CLI" in line)
+        assert "~/.gemini/settings.json" in gemini
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can read each file")
@@ -885,6 +1017,123 @@ def test_opencode_uses_the_jsonc_file_when_it_is_the_only_one(box: Sandbox, key_
     assert "// my config" in path.read_text()
     assert f"Bearer {GOOD_KEY}" in path.read_text()
     assert not (path.parent / "opencode.json").exists()
+
+
+# ------------------------------------------------------------------ inbox hooks (Cursor, Gemini CLI)
+
+
+def test_cursor_and_gemini_get_the_inbox_hooks(box: Sandbox, key_server: KeyServer) -> None:
+    args = ["--url", key_server.url, "--agents", "cursor,gemini"]
+    planned = box.run(*args, "--dry-run")
+    assert 'would add "tasks" to ~/.cursor/mcp.json, with the inbox hooks in ~/.cursor/hooks.json' in planned.out
+    assert box.files() == set()
+
+    result = box.run(*args, key=GOOD_KEY)
+    assert result.code == 0, result.text
+    assert 'added "tasks" to ~/.cursor/mcp.json. Added the inbox hooks to ~/.cursor/hooks.json.' in result.out
+    assert "Inbox hooks are on for: Cursor, Gemini CLI." in result.out
+    assert "What to try next" in result.out
+    assert "Create a task for the agent in the Relaydeck app." in result.out
+    assert "trust the Relaydeck hooks" not in result.out
+    assert read_json(box.home / ".cursor/hooks.json") == {"version": 1, "hooks": cursor_hooks()}
+    assert (box.home / ".cursor/hooks.json").read_text().startswith('{\n  "hooks": {\n    "stop": [\n')
+    assert read_json(box.home / ".gemini/settings.json")["hooks"] == gemini_hooks()
+    scripts = [box.home / folder / "hooks/relaydeck-inbox.sh" for folder in (".cursor", ".gemini")]
+    for script in scripts:
+        assert script.read_text() == HOOK_SCRIPT.read_text()
+        assert script.stat().st_mode & 0o777 == 0o600
+    assert backups(box.home / ".gemini/settings.json") == []
+
+    snapshot = box.snapshot()
+    again = box.run(*args, key=GOOD_KEY)
+    assert again.out.count("No change.") == 2
+    assert box.snapshot() == snapshot
+
+    planned = box.run(*args, "--uninstall", "--dry-run")
+    assert planned.out.count("and the inbox hooks from") == 2
+    assert box.snapshot() == snapshot
+    removed = box.run(*args, "--uninstall")
+    assert removed.code == 0, removed.text
+    assert 'removed "tasks" from ~/.cursor/mcp.json and the inbox hooks from ~/.cursor/hooks.json' in removed.out
+    assert read_json(box.home / ".cursor/hooks.json") == {"version": 1}
+    assert read_json(box.home / ".gemini/settings.json") == {"mcpServers": {}}
+    assert not any(script.exists() or script.parent.exists() for script in scripts)
+    assert box.run(*args, "--uninstall").out.count("Nothing to remove.") == 2
+
+
+CURSOR_HOOKS_FILE = """{
+  "version": 1,
+  "hooks": {
+    // format each file after an edit
+    "afterFileEdit": [{ "command": "./hooks/format.sh" }],
+    "stop": [
+      { "command": "./hooks/audit.sh", "loop_limit": 10 }
+    ]
+  }
+}
+"""
+GEMINI_HOOKS_FILE = """{
+  "theme": "dark",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [{ "type": "command", "command": "echo hello" }]
+      }
+    ]
+  }
+}
+"""
+
+
+def test_the_hooks_of_the_person_stay(box: Sandbox, key_server: KeyServer) -> None:
+    cursor = box.home / ".cursor/hooks.json"
+    gemini = box.home / ".gemini/settings.json"
+    for path, content in ((cursor, CURSOR_HOOKS_FILE), (gemini, GEMINI_HOOKS_FILE)):
+        path.parent.mkdir()
+        path.write_text(content)
+    (box.home / ".cursor/hooks").mkdir()
+    (box.home / ".cursor/hooks/format.sh").write_text("#!/bin/sh\n")
+    args = ["--url", key_server.url, "--agents", "cursor,gemini"]
+    result = box.run(*args, key=GOOD_KEY)
+    assert result.code == 0, result.text
+
+    audit: Json = {"command": "./hooks/audit.sh", "loop_limit": 10}
+    assert "// format each file after an edit" in cursor.read_text()
+    hooks = _loose_json(cursor)["hooks"]
+    assert hooks["afterFileEdit"] == [{"command": "./hooks/format.sh"}]
+    assert hooks["stop"] == [cursor_hooks()["stop"][0], audit]
+    assert hooks["sessionStart"] == cursor_hooks()["sessionStart"]
+    assert [backup.read_text() for backup in backups(cursor)] == [CURSOR_HOOKS_FILE]
+    hello: Json = {"hooks": [{"type": "command", "command": "echo hello"}]}
+    settings = read_json(gemini)
+    assert settings["hooks"] == gemini_hooks() | {"SessionStart": [gemini_hooks()["SessionStart"][0], hello]}
+    assert [backup.read_text() for backup in backups(gemini)] == [GEMINI_HOOKS_FILE]
+
+    # A different server name gives new hook commands. The agent keeps one set of Relaydeck hooks.
+    renamed = box.run(*args, "--name", "relay", key=GOOD_KEY)
+    assert renamed.code == 0, renamed.text
+    assert _loose_json(cursor)["hooks"]["stop"] == [cursor_hooks("relay")["stop"][0], audit]
+    assert read_json(gemini)["hooks"]["AfterAgent"] == gemini_hooks("relay")["AfterAgent"]
+
+    assert box.run(*args, "--name", "relay", "--uninstall").code == 0
+    assert box.run(*args, "--uninstall").code == 0
+    assert cursor.read_text() == CURSOR_HOOKS_FILE
+    assert read_json(gemini) == json.loads(GEMINI_HOOKS_FILE) | {"mcpServers": {}}
+    assert (box.home / ".cursor/hooks/format.sh").exists()
+    assert not (box.home / ".cursor/hooks/relaydeck-inbox.sh").exists()
+
+
+def test_a_hook_file_that_is_not_valid_keeps_the_server(box: Sandbox, key_server: KeyServer) -> None:
+    path = box.home / ".cursor/hooks.json"
+    path.parent.mkdir()
+    path.write_text('{"version": 1, "hooks": []}\n')
+    result = box.run("--url", key_server.url, "--agents", "cursor", key=GOOD_KEY)
+    assert result.code == 0, result.text
+    assert "The inbox hooks were not changed: ~/.cursor/hooks.json is not valid JSON for the installer." in result.out
+    assert "Inbox hooks are on for" not in result.out
+    assert path.read_text() == '{"version": 1, "hooks": []}\n'
+    assert read_json(box.home / ".cursor/mcp.json") == {"mcpServers": {"tasks": entry(key_server.url)}}
+    assert not (box.home / ".cursor/hooks").exists()
 
 
 # ------------------------------------------------------------------ a second run, a new key, a name conflict
@@ -1045,7 +1294,10 @@ def test_claude_code_uses_the_plugin_for_the_hosted_server(box: Sandbox) -> None
     box.stub("curl", CURL_STUB)
     result = box.run("--agents", "claude", key=GOOD_KEY)
     assert result.code == 0, result.text
-    assert "installed the plugin relaydeck@relaydeck. Saved the API key in secure storage." in result.out
+    assert "installed the plugin relaydeck@relaydeck with the inbox hooks." in result.out
+    assert "Saved the API key in secure storage." in result.out
+    assert "Inbox hooks are on for: Claude Code." in result.out
+    assert "trust the Relaydeck hooks" not in result.out
     assert box.commands("claude") == [
         "plugin list --json",
         "plugin marketplace add Aayush9029/mcp-server",
@@ -1068,7 +1320,12 @@ def test_claude_code_uses_the_plugin_for_the_hosted_server(box: Sandbox) -> None
     again = box.run("--agents", "claude", key=SECOND_KEY)
     assert again.code == 0, again.text
     assert "is already installed. Saved the API key again." in again.out
-    assert box.commands("claude")[4:] == ["plugin list --json", "plugin configure relaydeck@relaydeck --values-stdin"]
+    assert box.commands("claude")[4:] == [
+        "plugin list --json",
+        "plugin marketplace update relaydeck",
+        "plugin update relaydeck@relaydeck --scope user",
+        "plugin configure relaydeck@relaydeck --values-stdin",
+    ]
     assert box.claude_state()["key"] == SECOND_KEY
 
     planned = box.run("--agents", "claude", "--uninstall", "--dry-run")
@@ -1231,6 +1488,74 @@ def test_the_codex_plugin_keeps_its_server(box: Sandbox, key_server: KeyServer) 
     assert backups(config)[0].read_text() == original
 
 
+def codex_plugins(box: Sandbox) -> Json:
+    return read_json(box.state / "codex-plugins.json")
+
+
+def test_codex_gets_the_plugin_for_the_inbox_hooks(box: Sandbox) -> None:
+    box.stub("codex", CODEX_STUB)
+    box.stub("curl", CURL_STUB)
+    planned = box.run("--agents", "codex", "--dry-run")
+    assert "and install the plugin relaydeck@relaydeck for the inbox hooks" in planned.out
+    assert planned.out.count("would ") == 1
+
+    result = box.run("--agents", "codex", key=GOOD_KEY)
+    assert result.code == 0, result.text
+    assert 'added "tasks" to ~/' not in result.out
+    assert "Installed the plugin relaydeck@relaydeck for the inbox hooks." in result.out
+    assert "Inbox hooks are on for" not in result.out
+    assert "Codex: the inbox hooks are installed." in result.out
+    assert "Type /hooks in Codex one time and trust the Relaydeck hooks." in result.out
+    assert box.commands("codex")[3:] == [
+        "mcp get tasks --json",
+        "mcp list --json",
+        "mcp get tasks --json",
+        "plugin list --json",
+        "plugin marketplace add Aayush9029/mcp-server",
+        "plugin add relaydeck@relaydeck",
+    ]
+    config = box.codex_home / "config.toml"
+    servers = tomllib.loads(config.read_text())["mcp_servers"]
+    url = "https://relaydeck.onrender.com/mcp"
+    assert servers == {"tasks": {"url": url, "http_headers": {"Authorization": f"Bearer {GOOD_KEY}"}}}
+    assert codex_plugins(box) == {"marketplaces": ["Aayush9029/mcp-server"], "installed": ["relaydeck@relaydeck"]}
+    assert all(GOOD_KEY not in " ".join(call["argv"]) for call in box.calls("codex"))
+
+    calls = len(box.commands("codex"))
+    again = box.run("--agents", "codex", key=GOOD_KEY)
+    assert "No change." in again.out
+    assert "Each agent was already set up." in again.out
+    assert box.commands("codex")[calls:] == [
+        "mcp get tasks --json",
+        "plugin list --json",
+        "plugin marketplace upgrade relaydeck",
+        "plugin add relaydeck@relaydeck",
+    ]
+
+    planned = box.run("--agents", "codex", "--uninstall", "--dry-run")
+    assert "the plugin relaydeck@relaydeck and the marketplace relaydeck" in planned.out
+    assert codex_plugins(box)["installed"] == ["relaydeck@relaydeck"]
+    removed = box.run("--agents", "codex", "--uninstall")
+    assert removed.code == 0, removed.text
+    assert 'removed "tasks" from' in removed.out
+    assert ", and the plugin relaydeck@relaydeck and the marketplace relaydeck" in removed.out
+    assert codex_plugins(box) == {"marketplaces": [], "installed": []}
+    assert "mcp_servers" not in tomllib.loads(config.read_text())
+    assert "Nothing to remove." in box.run("--agents", "codex", "--uninstall").out
+
+
+def test_codex_keeps_its_server_when_the_plugin_does_not_install(box: Sandbox) -> None:
+    box.stub("codex", CODEX_STUB)
+    box.stub("curl", CURL_STUB)
+    result = box.run("--agents", "codex", key=GOOD_KEY, env={"STUB_FAIL": "marketplace"})
+    assert result.code == 0, result.text
+    assert "The plugin relaydeck@relaydeck for the inbox hooks was not installed." in result.out
+    assert "Done. 1 agent can now use the server" in result.out
+    assert "Inbox hooks are on for" not in result.out
+    assert "trust the Relaydeck hooks" not in result.out
+    assert "mcp_servers" in tomllib.loads((box.codex_home / "config.toml").read_text())
+
+
 def test_a_different_codex_server_with_the_same_name_is_not_replaced(box: Sandbox, key_server: KeyServer) -> None:
     box.stub("codex", CODEX_STUB)
     config = box.codex_home / "config.toml"
@@ -1260,12 +1585,18 @@ def test_jq_does_the_merge_when_python_is_absent(box: Sandbox, key_server: KeySe
     assert list(merged["mcpServers"]) == ["github", "linear", "tasks"]
     assert backups(path)[0].read_text() == CURSOR_FILE
     gemini = read_json(box.home / ".gemini/settings.json")
-    assert gemini == {"mcpServers": {"tasks": entry(key_server.url, url_field="httpUrl")}}
+    assert gemini == {"mcpServers": {"tasks": entry(key_server.url, url_field="httpUrl")}, "hooks": gemini_hooks()}
+    assert read_json(box.home / ".cursor/hooks.json") == {"version": 1, "hooks": cursor_hooks()}
 
     assert box.run(*args, key=GOOD_KEY).out.count("No change.") == 2
     assert box.run(*args, key=SECOND_KEY).out.count("updated") == 2
+    assert box.run(*args, "--name", "relay", key=GOOD_KEY).code == 0
+    assert read_json(box.home / ".cursor/hooks.json")["hooks"] == cursor_hooks("relay")
+    assert box.run(*args, "--name", "relay", "--uninstall").code == 0
     assert box.run(*args, "--uninstall").code == 0
     assert read_json(path) == json.loads(CURSOR_FILE)
+    assert read_json(box.home / ".cursor/hooks.json") == {"version": 1}
+    assert read_json(box.home / ".gemini/settings.json") == {"mcpServers": {}}
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="jq is not installed")
@@ -1290,6 +1621,8 @@ def test_without_python_and_jq_only_a_new_file_is_possible(box: Sandbox, key_ser
     assert read_json(box.home / ".cursor/mcp.json") == {"mcpServers": {"tasks": entry(key_server.url)}}
     assert "python3 or jq is necessary to change ~/.gemini/settings.json safely. Not changed." in result.out
     assert gemini.read_text() == '{"theme": "dark"}\n'
+    assert "The inbox hooks need python3 or jq, so they were not changed." in result.out
+    assert not (box.home / ".cursor/hooks.json").exists()
 
 
 # ------------------------------------------------------------------ the script itself

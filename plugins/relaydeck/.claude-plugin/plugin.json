@@ -1,8 +1,8 @@
 {
   "name": "relaydeck",
   "displayName": "Relaydeck",
-  "version": "1.0.0",
-  "description": "Send tasks, progress, and push notifications from your agent to the Relaydeck app on iPhone, iPad, and Apple Watch.",
+  "version": "1.1.0",
+  "description": "Two-way tasks between your agent and the Relaydeck app on iPhone, iPad, and Apple Watch: the agent reports its work, and it gets your tasks, answers, and messages.",
   "author": {
     "name": "Aayush9029",
     "url": "https://github.com/Aayush9029"
@@ -18,6 +18,14 @@
       "description": "Create a key in the Relaydeck iOS app. The key starts with mck_.",
       "required": true,
       "sensitive": true
+    },
+    "idle_watch_minutes": {
+      "type": "number",
+      "title": "Minutes to listen while the agent waits",
+      "description": "After the agent stops, the plugin listens for new inbox items for this many minutes and wakes the agent when one comes. Set 0 to turn this off.",
+      "default": 480,
+      "min": 0,
+      "max": 1440
     }
   },
   "mcpServers": {

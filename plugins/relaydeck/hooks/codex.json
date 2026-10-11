@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${PLUGIN_ROOT}/hooks/inbox.sh\"; if [ -r \"$f\" ]; then sh \"$f\" codex start; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${PLUGIN_ROOT}/hooks/inbox.sh\"; if [ -r \"$f\" ]; then sh \"$f\" codex prompt; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${PLUGIN_ROOT}/hooks/inbox.sh\"; if [ -r \"$f\" ]; then sh \"$f\" codex stop; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "description": "Brings the Relaydeck inbox to the agent: when a session starts, with each prompt, before a stop, and while the agent waits.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${CLAUDE_PLUGIN_ROOT}/hooks/inbox.sh\"; if [ -r \"$f\" ]; then sh \"$f\" claude start; fi",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "f=\"${CLAUDE_PLUGIN_ROOT}/hooks/inbox.sh\"; if [ -r \"$f\" ]; then sh \"$f\" claude watch; fi",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 86700
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${CLAUDE_PLUGIN_ROOT}/hooks/inbox.sh\"; if [ -r \"$f\" ]; then sh \"$f\" claude prompt; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${CLAUDE_PLUGIN_ROOT}/hooks/inbox.sh\"; if [ -r \"$f\" ]; then sh \"$f\" claude stop; fi",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "f=\"${CLAUDE_PLUGIN_ROOT}/hooks/inbox.sh\"; if [ -r \"$f\" ]; then sh \"$f\" claude watch; fi",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 86700
+          }
+        ]
+      }
+    ]
+  }
+}
