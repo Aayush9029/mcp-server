@@ -1,0 +1,327 @@
+{% extends "base.html" %}
+{% import "partials/devices.html" as devices with context %}
+{% import "partials/art.html" as art with context %}
+{% import "partials/store.html" as store with context %}
+
+{% block main %}
+<section class="hero">
+  <div class="hero-stage">
+    {{ devices.phone("iphone-task-detail", "", "eager") }}
+    {{ devices.phone("iphone-tasks", "The task list of the app, with four tasks from Claude Code and Codex. Two tasks show a progress bar and a status note.", "first") }}
+    {{ devices.phone("iphone-keys", "", "eager") }}
+  </div>
+  <div class="hero-copy wrap">
+    <h1 class="hero-title">
+      <span class="hero-name">{{ app_name }}</span>
+      <span class="hero-line">See your agents work.</span>
+    </h1>
+    <div class="hero-action">
+      <p class="hero-intro">Claude Code, Codex, Cursor, and other MCP clients report to your iPhone, iPad, and Apple&nbsp;Watch.</p>
+      {{ store.install("One-line setup") }}
+      <div class="hero-links">
+        {{ store.store_action() }}
+        <a class="link" href="#connect">Set up an agent</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt highlights" aria-labelledby="highlights-title">
+  <div class="wrap highlights-head">
+    <h2 class="title" id="highlights-title">The highlights.</h2>
+    <div class="gallery-controls" data-gallery-controls hidden>
+      <button type="button" class="round" data-gallery-previous aria-label="Previous highlight">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+      </button>
+      <button type="button" class="round" data-gallery-next aria-label="Next highlight">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>
+      </button>
+    </div>
+  </div>
+  <ul class="gallery" data-gallery tabindex="0" aria-label="Highlights">
+    <li class="card card-inbox">
+      <p class="card-caption">One inbox for the tasks of every agent.</p>
+      <div class="card-visual">
+        {{ devices.phone("iphone-tasks", "The task list of the app.") }}
+      </div>
+    </li>
+    <li class="card card-question">
+      <p class="card-caption">Answer a question from the notification.</p>
+      <div class="card-visual" role="img" aria-label="Illustration of two notifications. One asks a yes or no question, and one gives three choices.">
+        {{ art.note("Codex", "Deploy the hotfix to production now?", ["Yes", "No"]) }}
+        {{ art.note("Claude Code", "Which branch do I rebase on?", ["main", "release", "develop"]) }}
+      </div>
+    </li>
+    <li class="card card-live">
+      <p class="card-caption">Live Activities with the style, symbol, and color you choose.</p>
+      <div class="card-visual" role="img" aria-label="Illustration of three Live Activities in the Dynamic Island, each with a different symbol and color.">
+        <span class="island"><span class="island-symbol">{{ art.symbol("terminal") }}</span><span class="island-text">Updating the sheet backgrounds</span><span class="island-value">62%</span></span>
+        <span class="island island-b"><span class="island-symbol">{{ art.symbol("sparkle") }}</span><span class="island-text">Waiting for CI</span><span class="island-value">84%</span></span>
+        <span class="island island-c"><span class="island-symbol">{{ art.symbol("bolt") }}</span><span class="island-text">Running the test suite</span><span class="island-value">26%</span></span>
+      </div>
+    </li>
+    <li class="card card-screens">
+      <img class="card-art" src="{{ asset('img/art-facets.avif') }}" width="1248" height="832" alt="" loading="lazy" decoding="async">
+      <p class="card-caption">Widgets, Siri, Shortcuts, and Apple&nbsp;Watch.</p>
+      <div class="card-visual">
+        {{ art.widgets() }}
+      </div>
+    </li>
+    <li class="card card-private">
+      <img class="card-art" src="{{ asset('img/art-paper.avif') }}" width="1344" height="768" alt="" loading="lazy" decoding="async">
+      <p class="card-caption">No email. No password. An open source server.</p>
+    </li>
+  </ul>
+</section>
+
+<section class="section story" id="tasks" aria-labelledby="tasks-title">
+  <div class="wrap">
+    <header class="lockup lockup-center reveal">
+      <p class="eyebrow">Task inbox</p>
+      <h2 class="headline" id="tasks-title">Every task. Live.</h2>
+    </header>
+    <div class="duo reveal-device">
+      {{ devices.ipad("ipad-task-detail", "The app on iPad. A sidebar lists four agents and five statuses. The task list is in the middle. The open task shows its progress at 62 percent, its plan, and a Mark Done button.") }}
+      {{ devices.phone("iphone-task-detail", "A task on iPhone, with its status, its progress at 62 percent, and the plan that the agent wrote.") }}
+    </div>
+    <p class="intro intro-center">An agent makes a task before it starts the work. <strong>The status, the progress, and a short note change on your devices while it works.</strong> Filter by agent or by status, open a task to read the plan, and mark it done yourself.</p>
+    <ul class="facts">
+      <li><span class="fact-value">0–100%</span><span class="fact-label">Progress on each task</span></li>
+      <li><span class="fact-value">140</span><span class="fact-label">Characters for the note that says what the agent does now</span></li>
+      <li><span class="fact-value">4</span><span class="fact-label">Priorities, from low to urgent</span></li>
+    </ul>
+  </div>
+</section>
+
+<section class="section section-alt story" id="questions" aria-labelledby="questions-title">
+  <div class="wrap columns">
+    <div class="columns-text reveal">
+      <p class="eyebrow">Questions</p>
+      <h2 class="headline headline-tight" id="questions-title">Agents ask. You&nbsp;answer.</h2>
+      <p class="intro">When an agent needs a decision, it asks you. <strong>Yes or no, one of up to four choices, or a line of text.</strong> Answer from the notification, the Live Activity, the app, or your Apple&nbsp;Watch. The agent gets your answer and continues.</p>
+    </div>
+    <div class="columns-media pair reveal-device">
+      {% if has_asset("img/iphone-question.avif") %}
+      {{ devices.phone("iphone-question", "A question from an agent on the Lock Screen.") }}
+      {% else %}
+      {% call devices.phone_art("Illustration of an iPhone Lock Screen with two questions from agents. One has Yes and No buttons, and one has three choices.") %}
+        {% call art.lock_screen() %}
+          {{ art.note("Codex", "Deploy the hotfix to production now?", ["Yes", "No"]) }}
+          {{ art.note("Claude Code", "Which branch do I rebase on?", ["main", "release", "develop"]) }}
+        {% endcall %}
+      {% endcall %}
+      {% endif %}
+      {% if has_asset("img/watch-question.avif") %}
+      {{ devices.watch_image("watch-question", "A question from an agent on Apple Watch.") }}
+      {% else %}
+      {% call devices.watch("Illustration of an Apple Watch with a question from an agent and the buttons Yes and No.") %}
+        {{ art.watch_question() }}
+      {% endcall %}
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="section story" id="live-activities" aria-labelledby="live-title">
+  <div class="wrap columns columns-reverse">
+    <div class="columns-text reveal">
+      <p class="eyebrow">Live Activities</p>
+      <h2 class="headline headline-tight" id="live-title">Progress, at a glance.</h2>
+      <p class="intro">A task in progress becomes a Live Activity on the Lock Screen and in the Dynamic Island. <strong>You choose the style, the symbol, and the accent color.</strong></p>
+      <fieldset class="picker">
+        <legend>Try an accent color</legend>
+        <label class="swatch swatch-violet"><input type="radio" name="accent" value="violet" checked><span class="sr">Violet</span></label>
+        <label class="swatch swatch-orange"><input type="radio" name="accent" value="orange"><span class="sr">Orange</span></label>
+        <label class="swatch swatch-green"><input type="radio" name="accent" value="green"><span class="sr">Green</span></label>
+        <label class="swatch swatch-blue"><input type="radio" name="accent" value="blue"><span class="sr">Blue</span></label>
+      </fieldset>
+    </div>
+    <div class="columns-media live reveal-device">
+      {% if has_asset("img/iphone-live-activity.avif") %}
+      {{ devices.phone("iphone-live-activity", "A Live Activity for a task on the Lock Screen.") }}
+      {% else %}
+      {% call devices.phone_art("Illustration of an iPhone Lock Screen with a Live Activity. The task is at 62 percent, and its note reads: Updating the sheet backgrounds.") %}
+        {% call art.lock_screen() %}
+          {{ art.activity() }}
+        {% endcall %}
+      {% endcall %}
+      {% endif %}
+      {% call devices.phone_art("Illustration of the top of an iPhone. The Dynamic Island is open and shows the same task at 62 percent.", "phone-top") %}
+        <div class="home">{{ art.activity() }}</div>
+      {% endcall %}
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt" id="everywhere" aria-labelledby="everywhere-title">
+  <div class="wrap">
+    <header class="lockup lockup-center reveal">
+      <p class="eyebrow">Widgets, Siri, and Apple Watch</p>
+      <h2 class="headline" id="everywhere-title">On every screen.</h2>
+    </header>
+    <ul class="bento">
+      <li class="tile tile-wide">
+        <div class="tile-text">
+          <h3 class="tile-title">Widgets</h3>
+          <p>Put your tasks on the Home Screen and the Lock Screen.</p>
+        </div>
+        <div class="tile-visual">
+          {% if has_asset("img/iphone-widgets.avif") %}
+          {{ devices.phone("iphone-widgets", "Widgets of the app on the Home Screen.") }}
+          {% else %}
+          {{ art.widgets() }}
+          {% endif %}
+        </div>
+      </li>
+      <li class="tile">
+        <div class="tile-text">
+          <h3 class="tile-title">Apple Watch</h3>
+          <p>Get the notification on your wrist, answer the question there, and add a complication to your watch face.</p>
+        </div>
+        <div class="tile-visual tile-visual-watch">
+          {% if has_asset("img/watch-question.avif") %}
+          {{ devices.watch_image("watch-question", "A question from an agent on Apple Watch.") }}
+          {% else %}
+          {% call devices.watch("Illustration of an Apple Watch with a question from an agent.") %}
+            {{ art.watch_question() }}
+          {% endcall %}
+          {% endif %}
+        </div>
+      </li>
+      <li class="tile tile-plain">
+        <div class="tile-text">
+          <h3 class="tile-title">Siri and Shortcuts</h3>
+          <p>Use the actions of the app with Siri, or put them in a shortcut.</p>
+        </div>
+        <svg class="tile-wave" viewBox="0 0 240 64" width="240" height="64" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" aria-hidden="true">
+          <path d="M8 32v0M28 24v16M48 14v36M68 26v12M88 6v52M108 20v24M128 12v40M148 27v10M168 16v32M188 24v16M208 28v8M228 32v0"/>
+        </svg>
+      </li>
+      <li class="tile tile-wide">
+        <div class="tile-text">
+          <h3 class="tile-title">iPad</h3>
+          <p>A sidebar for your agents and statuses, with the open task beside the list.</p>
+        </div>
+        <div class="tile-visual tile-visual-ipad">
+          {{ devices.ipad("ipad-task-detail", "The app on iPad, with the sidebar, the task list, and one open task.") }}
+        </div>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<section class="section story" id="privacy" aria-labelledby="privacy-title">
+  <div class="wrap columns">
+    <div class="columns-text reveal">
+      <p class="eyebrow">Privacy</p>
+      <h2 class="headline headline-tight" id="privacy-title">No email. No&nbsp;password.</h2>
+      <p class="intro">The app makes an anonymous account the first time it opens. <strong>The server stores no name and no email address.</strong> It has no tracking, no ads, and no third-party analytics.</p>
+      <ul class="points">
+        <li><h3>One key for each agent</h3><p>Each agent has its own API key and sees only its own tasks. The server keeps a hash of the key, not the key.</p></li>
+        <li><h3>Yours to delete</h3><p>Delete a task, a key, or the full account in the app. The data goes immediately.</p></li>
+        <li><h3>Closed tasks expire</h3><p>The server deletes a task {{ task_days }} days after it is done or cancelled.</p></li>
+      </ul>
+      <a class="link" href="/privacy">Read what the server stores</a>
+    </div>
+    <div class="columns-media pair pair-phones reveal-device">
+      {{ devices.phone("iphone-keys", "The API Keys screen. Each agent has its own key: Windsurf, Codex, Cursor, and Claude Code. Three keys are hidden behind dots.") }}
+      {{ devices.phone("iphone-settings", "The Settings screen, with switches for notifications and Live Activities, and a button named Delete Account and Data.") }}
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt" id="summary" aria-labelledby="summary-title">
+  <div class="wrap">
+    <header class="lockup reveal">
+      <p class="eyebrow">In short</p>
+      <h2 class="title" id="summary-title">From the agent to you.</h2>
+      <p class="intro">An agent gets eight tools. <strong>This is what they do on your side.</strong></p>
+    </header>
+    <ol class="relay">
+      <li><p class="relay-from">The agent makes a task.</p><p class="relay-to">You see it in the inbox on each device.</p></li>
+      <li><p class="relay-from">The agent updates the status and the progress.</p><p class="relay-to">You watch the task and its Live Activity change.</p></li>
+      <li><p class="relay-from">The agent sends a notification.</p><p class="relay-to">You get it on iPhone, iPad, and Apple&nbsp;Watch.</p></li>
+      <li><p class="relay-from">The agent asks a question.</p><p class="relay-to">You answer from the notification, the Live Activity, the app, or the watch.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section class="section connect" id="connect" aria-labelledby="connect-title">
+  <div class="wrap wrap-narrow">
+    <header class="lockup lockup-center reveal">
+      <p class="eyebrow">Setup</p>
+      <h2 class="headline" id="connect-title">Connect your agent.</h2>
+      <p class="intro">Make an API key in the app. Then run one command in a terminal.</p>
+    </header>
+    <div class="connect-primary">
+      {{ store.install("One-line setup") }}
+      <p class="fine">The script finds the agents on this computer and asks for your API key. You can <a class="link-inline" href="/install.sh">read the script</a> before you run it.</p>
+    </div>
+    <h3 class="connect-manual">Or set up one agent by hand</h3>
+    <p class="fine connect-key">Replace <code>{{ key_placeholder }}</code> with a key from the app.</p>
+    <div class="tabs" data-tabs>
+      <div class="tab-list" role="tablist" aria-label="Agent">
+        {% for tab in tabs %}
+        <button type="button" class="tab" role="tab" id="tab-{{ tab.id }}" aria-controls="panel-{{ tab.id }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ tab.name }}</button>
+        {% endfor %}
+      </div>
+      {% for tab in tabs %}
+      <div class="tab-panel" role="tabpanel" id="panel-{{ tab.id }}" aria-labelledby="tab-{{ tab.id }}" tabindex="0">
+        <h4 class="tab-panel-title">{{ tab.name }}</h4>
+        {% if tab.action %}
+        <div class="step">
+          <a class="button button-accent" href="{{ tab.action.url }}">{{ tab.action.label }}</a>
+          <p class="step-note">{{ tab.action.note }}</p>
+        </div>
+        {% endif %}
+        {% for step in tab.steps %}
+        <div class="step">
+          <p class="step-title">{{ step.heading }}</p>
+          {{ step.html|safe }}
+          {% if step.note %}<p class="step-note">{{ step.note }}</p>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt" id="open-source" aria-labelledby="source-title">
+  <div class="wrap">
+    <div class="panel">
+      <img class="panel-art" src="{{ asset('img/art-paper.avif') }}" width="1344" height="768" alt="" loading="lazy" decoding="async">
+      <div class="panel-text">
+        <p class="eyebrow">Open source</p>
+        <h2 class="title" id="source-title">Read the server.</h2>
+        <p class="intro">The server is open source. <strong>Read how it keeps your data, call the REST API from a script, or run your own copy.</strong></p>
+        <div class="panel-links">
+          <a class="button button-light" href="/docs">Read the docs</a>
+          {% if repository_url %}
+          <a class="link" href="{{ repository_url }}">View the source</a>
+          {% endif %}
+        </div>
+      </div>
+      {% if docs %}
+      <ul class="panel-docs">
+        {% for doc in docs[:6] %}
+        <li><a href="{{ doc.path }}"><span>{{ doc.title }}</span>
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg></a></li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="section closing" aria-labelledby="closing-title">
+  <div class="wrap lockup-center">
+    <img class="closing-icon" src="{{ asset('img/app-icon.png') }}" width="96" height="96" alt="" loading="lazy" decoding="async">
+    <h2 class="headline" id="closing-title">{{ app_name }}</h2>
+    <p class="intro">For iPhone, iPad, and Apple&nbsp;Watch.</p>
+    <div class="closing-action">
+      {{ store.store_action(large=true) }}
+    </div>
+  </div>
+</section>
+{% endblock %}

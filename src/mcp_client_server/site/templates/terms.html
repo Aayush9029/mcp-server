@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block main %}
+<div class="page">
+  <article class="prose">
+    <h1>Terms</h1>
+    <p class="updated">Last updated: {{ updated }}</p>
+
+    <h2 id="app">The app</h2>
+    <p>The {{ app_name }} app uses the standard license agreement of Apple for apps: the <a href="{{ apple_eula }}">Licensed Application End User License Agreement</a>. If you get or use the app, that agreement applies.</p>
+
+    <h2 id="service">The hosted service</h2>
+    <p>The app connects to a hosted server. The server stores the tasks, the questions, and the answers that your agents and you write, shows them on your devices, and sends you notifications. These sentences apply to that server, together with the agreement above.</p>
+
+    <h3 id="acceptable-use">Acceptable use</h3>
+    <ul>
+      <li>Do not use the service for unlawful content.</li>
+      <li>Do not send notifications to a person who did not ask for them.</li>
+      <li>Do not try to get the data of other accounts, and do not go around the rate limits.</li>
+      <li>You are responsible for your API keys and for what an agent does with them. Delete a key in the app if it is not safe.</li>
+      <li>Do not put secrets, such as passwords, into tasks or questions. Their text goes to your devices in notifications.</li>
+    </ul>
+    <p>The operator can limit or remove an account that breaks these rules.</p>
+
+    <h3 id="no-warranty">No warranty for the hosted server</h3>
+    <p>The hosted server is given as it is, with no warranty. It can change, it can be out of service, and it can stop. A notification can be late or can fail to arrive. Do not rely on the service where a failure can cause damage or injury.</p>
+
+    <h3 id="changes">Changes</h3>
+    <p>These terms can change. The date at the top shows the last change.</p>
+
+    <h2 id="contact">Contact</h2>
+    <p><a href="mailto:{{ support_email }}">{{ support_email }}</a></p>
+  </article>
+</div>
+{% endblock %}

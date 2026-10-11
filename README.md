@@ -45,7 +45,13 @@ Perfect for developers who want their AI assistants to collaborate on real proje
 
 Open the iOS app and create a key for each agent.
 
-### 2. Choose Your Setup
+### 2. Connect Your Agents
+
+```bash
+curl -fsSL https://relaydeck.onrender.com/install | sh
+```
+
+The installer finds the coding agents on your machine, asks which ones to set up, and asks for your API key one time. Or set up one agent by hand:
 
 #### For Claude Code
 

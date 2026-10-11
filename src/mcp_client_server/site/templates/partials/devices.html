@@ -1,0 +1,50 @@
+{% macro phone(name, alt, loading="lazy") -%}
+<div class="device phone">
+  <div class="device-body">
+    <div class="device-screen">
+      <img src="{{ asset('img/' ~ name ~ '.avif') }}" alt="{{ alt }}" width="660" height="1435"{% if loading == "lazy" %} loading="lazy"{% elif loading == "first" %} fetchpriority="high"{% endif %} decoding="async">
+      <span class="device-island"></span>
+    </div>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro phone_art(label, variant="") -%}
+<div class="device phone{% if variant %} {{ variant }}{% endif %}" role="img" aria-label="{{ label }}">
+  <div class="device-body">
+    <div class="device-screen device-art">
+      {{ caller() }}
+    </div>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro ipad(name, alt) -%}
+<div class="device ipad">
+  <div class="device-body">
+    <div class="device-screen">
+      <img src="{{ asset('img/' ~ name ~ '.avif') }}" alt="{{ alt }}" width="1600" height="1200" loading="lazy" decoding="async">
+    </div>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro watch(label) -%}
+<div class="device watch" role="img" aria-label="{{ label }}">
+  <div class="device-body">
+    <div class="device-screen device-art">
+      {{ caller() }}
+    </div>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro watch_image(name, alt) -%}
+<div class="device watch">
+  <div class="device-body">
+    <div class="device-screen">
+      <img src="{{ asset('img/' ~ name ~ '.avif') }}" alt="{{ alt }}" width="416" height="496" loading="lazy" decoding="async">
+    </div>
+  </div>
+</div>
+{%- endmacro %}

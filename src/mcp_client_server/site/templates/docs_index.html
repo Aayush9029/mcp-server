@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% import "partials/store.html" as store with context %}
+
+{% block main %}
+<div class="docs docs-home">
+  {% include "partials/docs_nav.html" %}
+  <article class="docs-article">
+    <header class="docs-head">
+      <h1 class="title">Documentation</h1>
+      <p class="intro">How to connect an agent to {{ app_name }}, what an agent can do, and how the server works.</p>
+    </header>
+    {% if show_quick_start %}
+    <section class="quick" aria-labelledby="quick-title">
+      <h2 class="quick-title" id="quick-title">Quick start</h2>
+      <ol class="quick-steps">
+        <li>Open the app and make an API key for your agent.</li>
+        <li>Run this command in a terminal on the computer where the agent runs.</li>
+      </ol>
+      {{ install_block|safe }}
+      <p class="fine">You can <a class="link-inline" href="/install.sh">read the script</a> before you run it. To set up one agent by hand, use the <a class="link-inline" href="/#connect">commands for each agent</a>.</p>
+    </section>
+    {% endif %}
+    {% if docs %}
+    <ul class="doc-list">
+      {% for item in docs %}
+      <li>
+        <a href="{{ item.path }}">
+          <span class="doc-list-title">{{ item.title }}</span>
+          {% if item.summary %}<span class="doc-list-summary">{{ item.summary }}</span>{% endif %}
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="intro">This server has no documentation pages.</p>
+    {% endif %}
+    <p class="fine docs-source">For language models: <a class="link-inline" href="/llms.txt">llms.txt</a> and <a class="link-inline" href="/llms-full.txt">llms-full.txt</a>.</p>
+  </article>
+</div>
+{% endblock %}

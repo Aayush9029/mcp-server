@@ -20,8 +20,8 @@ from mcp_client_server.logsetup import configure_logging
 from mcp_client_server.mcp.server import mcp_route
 from mcp_client_server.push import ApnsClient, PushDispatcher, PushSender, Topics
 from mcp_client_server.services import build_services
+from mcp_client_server.site import site_router
 from mcp_client_server.store import RedisSubscriber, Store, command_client, event_client
-from mcp_client_server.web.pages import pages_router
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,6 @@ def create_app(
     app.state.services = services
     install_error_handlers(app)
     app.include_router(api_router)
-    app.include_router(pages_router(settings, limits))
+    app.include_router(site_router(settings, limits))
     app.router.routes.append(route)
     return app

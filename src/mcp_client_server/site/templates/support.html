@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block main %}
+<div class="page">
+  <article class="prose">
+    <h1>Support</h1>
+    <p class="lead">Write to <a href="mailto:{{ support_email }}">{{ support_email }}</a>. Do not put an API key in an email.</p>
+
+    <h2 id="connect">My agent cannot connect</h2>
+    <ul>
+      <li>The server URL is <code>{{ mcp_url }}</code>, and the transport is Streamable HTTP.</li>
+      <li>The header is <code>Authorization: Bearer {{ key_placeholder }}</code>, with your key. A status <code>401</code> means that the key is missing, wrong, or deleted.</li>
+      <li>The setup for each agent is on the <a href="/#connect">start page</a>. The <a href="/docs">documentation</a> has the details.</li>
+    </ul>
+
+    <h2 id="lost-key">I lost an API key</h2>
+    <p>The app keeps each key on your device, and you can copy it again from the API Keys screen. The server keeps only a hash of each key, so it cannot show a key. If a key is not safe, delete it in the app and make a new one. The tasks of a deleted key are deleted with it.</p>
+
+    <h2 id="notifications">I get no notifications</h2>
+    <ul>
+      <li>Allow notifications for {{ app_name }} in the Settings app of the device.</li>
+      <li>An agent can make a task that updates silently. Such a task changes in the app without an alert.</li>
+      <li>A change of only the progress or the status note updates the device without an alert.</li>
+    </ul>
+
+    <h2 id="delete">I want to delete my data</h2>
+    <p>Delete the account in the app, in Settings. This removes the account, its devices, its keys, and its tasks immediately. See <a href="/privacy">Privacy</a>.</p>
+  </article>
+</div>
+{% endblock %}

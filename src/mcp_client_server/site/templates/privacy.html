@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block main %}
+<div class="page">
+  <article class="prose">
+    <h1>Privacy</h1>
+    <p class="updated">Last updated: {{ updated }}</p>
+    <p class="lead">{{ app_name }} has no email addresses, no names, and no passwords. Your account is anonymous. The service has no tracking, no ads, and no third-party analytics.</p>
+
+    <h2 id="stored">What the server stores</h2>
+    <ul>
+      <li><strong>An anonymous account ID.</strong> The app gets a random ID and a secret token the first time it opens. The server keeps only a SHA-256 hash of the token.</li>
+      <li><strong>Your devices.</strong> For each device: a device ID that the app makes, the platform, the device model, the OS version, the app version, and the push tokens that Apple gives the app.</li>
+      <li><strong>Your API keys.</strong> For each key: a SHA-256 hash of the secret, your label, the first and last characters of the secret so that you can recognize it, the time of the last use, and the name and version of the last MCP client that used it. The server cannot show a secret again.</li>
+      <li><strong>Your tasks, questions, and answers.</strong> The text that your agents and you write: task titles, descriptions, statuses, priorities, progress, and notes, the questions that an agent asks with their choices, and the answers that you give.</li>
+      {% if uses_app_attest %}
+      <li><strong>An app attestation.</strong> When the app makes your account, it sends a proof from Apple's App Attest service that the request comes from the real app. The server keeps the key ID, the public key, and the counter of that proof with the account. They do not say who you are.</li>
+      {% endif %}
+    </ul>
+
+    <h2 id="not-stored">What the server does not store</h2>
+    <ul>
+      <li>No name, no email address, no phone number, no contacts, no location.</li>
+      <li>No advertising identifiers and no tracking cookies. This site sets no cookies and loads nothing from other hosts.</li>
+    </ul>
+
+    <h2 id="shared">Who gets your data</h2>
+    <ul>
+      <li><strong>Apple.</strong> To send a notification or to update a Live Activity, the server sends the push token and the content of the notification, for example a task title, a question, and a key label, to the Apple Push Notification service.</li>
+      <li><strong>The hosting provider.</strong> The server and its database run at a hosting provider, which keeps standard request logs. The server does not write a token or an API key to a log.</li>
+    </ul>
+    <p>The operator does not sell data and does not share it with any other party.</p>
+
+    <h2 id="limits">Rate limits</h2>
+    <p>To stop abuse, the server counts requests for each credential, and counts new accounts for each IP address. A counter for an IP address stays for two hours at most.</p>
+
+    <h2 id="retention">How long data stays</h2>
+    <ul>
+      <li>A task with the status done or cancelled is deleted {{ task_days }} days after its last change.</li>
+      <li>A question that is answered, expired, or cancelled is deleted {{ question_days }} days after it closed.</li>
+      <li>All other data stays until you delete it.</li>
+    </ul>
+
+    <h2 id="delete">How to delete your data</h2>
+    <p>Delete a task, a key, or the full account in the app. A deleted key takes all its tasks and questions with it. A deleted account takes its devices, keys, tasks, questions, and answers with it, immediately. You can also send <code>DELETE /v1/account</code> with your account token.</p>
+
+    <h2 id="contact">Contact</h2>
+    <p><a href="mailto:{{ support_email }}">{{ support_email }}</a></p>
+  </article>
+</div>
+{% endblock %}

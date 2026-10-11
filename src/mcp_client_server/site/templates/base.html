@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{ page.title }}</title>
+<meta name="description" content="{{ page.description }}">
+<link rel="canonical" href="{{ base_url }}{{ page.path }}">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#000000">
+<meta name="darkreader-lock">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="{{ app_name }}">
+<meta property="og:title" content="{{ page.title }}">
+<meta property="og:description" content="{{ page.description }}">
+<meta property="og:url" content="{{ base_url }}{{ page.path }}">
+<meta property="og:image" content="{{ base_url }}{{ asset('img/og.jpg') }}">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="An iPhone with a list of tasks from AI coding agents.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ page.title }}">
+<meta name="twitter:description" content="{{ page.description }}">
+<meta name="twitter:image" content="{{ base_url }}{{ asset('img/og.jpg') }}">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" type="image/png" sizes="192x192" href="{{ asset('img/app-icon.png') }}">
+<link rel="apple-touch-icon" href="{{ asset('img/apple-touch-icon.png') }}">
+<link rel="alternate" type="text/plain" title="llms.txt" href="/llms.txt">
+{% block head %}{% endblock %}
+<link rel="stylesheet" href="{{ asset('site.css') }}">
+<script src="{{ asset('site.js') }}" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav">
+  <nav class="nav-bar" aria-label="Main">
+    <a class="nav-home" href="/">
+      <img src="{{ asset('img/app-icon.png') }}" width="28" height="28" alt="">
+      <span>{{ app_name }}</span>
+    </a>
+    <ul class="nav-links">
+      <li><a class="nav-link" href="/docs"{% if page.path.startswith("/docs") %} aria-current="page"{% endif %}>Docs</a></li>
+      <li><a class="pill pill-quiet" href="/#connect">Connect</a></li>
+      {% if app_store_url %}
+      <li><a class="pill pill-accent" href="{{ app_store_url }}">Get the app</a></li>
+      {% else %}
+      <li class="nav-soon">Coming soon to the App&nbsp;Store</li>
+      {% endif %}
+    </ul>
+  </nav>
+</header>
+<main id="main">
+{% block main %}{% endblock %}
+</main>
+<footer class="footer">
+  <div class="wrap">
+    <p class="footer-note">Some screen images on this site are illustrations. The app can look different.</p>
+    <p class="footer-note">Apple, iPhone, iPad, Apple Watch, Dynamic Island, and Siri are trademarks of Apple Inc. App Store is a service mark of Apple Inc. Claude Code, Codex, and Cursor are trademarks of their owners.</p>
+    <div class="footer-row">
+      <p>© {{ year }} {{ app_name }}</p>
+      <ul class="footer-links">
+        <li><a href="/docs">Docs</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li>
+        <li><a href="/support">Support</a></li>
+        {% if repository_url %}
+        <li><a href="{{ repository_url }}">Source code</a></li>
+        {% endif %}
+        <li><a href="/llms.txt">llms.txt</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

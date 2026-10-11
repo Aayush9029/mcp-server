@@ -1,0 +1,8 @@
+<nav class="docs-side" aria-label="Documentation">
+  <p class="docs-side-title"><a href="/docs"{% if page.path == "/docs" %} aria-current="page"{% endif %}>Documentation</a></p>
+  <ul>
+    {% for item in docs %}
+    <li><a href="{{ item.path }}"{% if page.path == item.path %} aria-current="page"{% endif %}>{{ item.title }}</a></li>
+    {% endfor %}
+  </ul>
+</nav>

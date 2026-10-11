@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block head %}
+<link rel="alternate" type="text/markdown" href="{{ doc.path }}.md">
+{% endblock %}
+
+{% block main %}
+<div class="docs">
+  {% include "partials/docs_nav.html" %}
+  <article class="docs-article">
+    <div class="prose">
+      {{ doc.html|safe }}
+    </div>
+    <nav class="pager" aria-label="More pages">
+      {% if older %}
+      <a class="pager-link" href="{{ older.path }}" rel="prev"><span class="pager-label">Previous</span><span class="pager-title">{{ older.title }}</span></a>
+      {% else %}
+      <span></span>
+      {% endif %}
+      {% if newer %}
+      <a class="pager-link pager-next" href="{{ newer.path }}" rel="next"><span class="pager-label">Next</span><span class="pager-title">{{ newer.title }}</span></a>
+      {% endif %}
+    </nav>
+    <p class="fine docs-source"><a class="link-inline" href="{{ doc.path }}.md">This page as Markdown</a></p>
+  </article>
+  {% if doc.headings %}
+  <nav class="docs-toc" aria-label="On this page" data-toc>
+    <p class="docs-toc-title">On this page</p>
+    <ul>
+      {% for heading in doc.headings %}
+      <li class="toc-level-{{ heading.level }}"><a href="#{{ heading.anchor }}">{{ heading.text }}</a></li>
+      {% endfor %}
+    </ul>
+  </nav>
+  {% endif %}
+</div>
+{% endblock %}

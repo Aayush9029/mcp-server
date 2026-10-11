@@ -1,0 +1,14 @@
+{% macro store_action(large=false) -%}
+{% if app_store_url %}
+<a class="button button-accent{% if large %} button-large{% endif %}" href="{{ app_store_url }}">Get the app</a>
+{% else %}
+<p class="soon{% if large %} soon-large{% endif %}">Coming soon to the App&nbsp;Store</p>
+{% endif %}
+{%- endmacro %}
+
+{% macro install(label) -%}
+<div class="install" role="group" aria-label="{{ label }}">
+  <code class="install-code" tabindex="0"><span class="install-prompt" aria-hidden="true">$ </span><span data-copy-source>curl -fsSL {{ base_url }}<wbr>/install | sh</span></code>
+  {{ copy_button|safe }}
+</div>
+{%- endmacro %}

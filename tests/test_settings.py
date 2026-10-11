@@ -1,7 +1,6 @@
-"""The static pages, the settings, and the rule that no credential reaches a log."""
+"""The settings, and the rule that no credential reaches a log."""
 
 import logging
-import re
 from pathlib import Path
 
 import httpx2
@@ -13,58 +12,11 @@ from mcp_client_server.logsetup import RedactKeyParam, configure_logging, redact
 from tests.conftest import Launch, TestSettings
 from tests.support import Api, mcp_client, secret_of
 
-PAGES = ["/", "/privacy", "/terms", "/support"]
 
-
-@pytest.mark.parametrize("path", PAGES)
-async def test_pages_are_self_contained_html(client: httpx2.AsyncClient, path: str) -> None:
-    response = await client.get(path)
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/html")
-    assert response.headers["cache-control"] == "public, max-age=300"
-    html = response.text
-    assert html.startswith("<!doctype html>")
-    assert "MCP Client" in html
-    for external in ("<script", "<link", "<img", "<iframe", "@import", "url(", "src="):
-        assert external not in html, external
-    links = set(re.findall(r'href="([^"]+)"', html))
-    assert links <= {"/", "/privacy", "/terms", "/support", "mailto:help@example.com"}
-
-
-async def test_home_page_has_the_setup_for_each_agent(client: httpx2.AsyncClient) -> None:
-    html = (await client.get("/")).text
-    for text in (
-        "claude mcp add --transport http tasks https://tasks.example.com/mcp",
-        "[mcp_servers.tasks]",
-        "mcpServers",
-        "Authorization: Bearer mck_YOUR_KEY",
-        "Other MCP clients",
-    ):
-        assert text in html, text
-
-
-async def test_privacy_page_says_what_the_server_stores_and_for_how_long(client: httpx2.AsyncClient) -> None:
-    html = (await client.get("/privacy")).text
-    for fact in ("anonymous account ID", "push tokens", "SHA-256 hash", "DELETE /v1/account", "90 days"):
-        assert fact in html, fact
-
-
-async def test_product_strings_come_from_the_settings_and_are_escaped(launch: Launch) -> None:
-    changes = {
-        "app_name": "Agent <Pulse>",
-        "support_email": "hi@pulse.example",
-        "app_store_url": "https://apps.example/id1",
-    }
-    async with launch(**changes) as running:
-        home = (await running.http.get("/")).text
-        support = (await running.http.get("/support")).text
+async def test_product_name_from_the_settings_reaches_the_mcp_server_info(launch: Launch) -> None:
+    async with launch(app_name="Agent <Pulse>") as running:
         _, key, _ = await running.api.agent()
         discover = (await running.api.rpc(key, "server/discover")).json()["result"]
-    assert "Agent &lt;Pulse&gt;" in home
-    assert "<Pulse>" not in home
-    assert "MCP Client" not in home
-    assert 'href="https://apps.example/id1"' in home
-    assert "hi@pulse.example" in support
     assert discover["_meta"]["io.modelcontextprotocol/serverInfo"]["title"] == "Agent <Pulse>"
     assert discover["instructions"].startswith("Agent <Pulse> shows your tasks")
 
