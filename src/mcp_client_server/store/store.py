@@ -19,6 +19,7 @@ from mcp_client_server.models import (
     AccountSettings,
     ClientInfo,
     Device,
+    InboxItem,
     Key,
     KeyCounts,
     Question,
@@ -48,6 +49,8 @@ DeviceTokenField = Literal["apns_token", "push_to_start_token", "widget_push_tok
 class AuthResult:
     principal: Principal | None
     limited: bool = False
+    # Unread inbox items of the key. The MCP surface shows this number with each tool result.
+    inbox_unread: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +167,9 @@ class Store:
         self._question_purge = reg(scripts.QUESTION_PURGE)
         self._question_list = reg(scripts.QUESTION_LIST)
         self._widget_slot = reg(scripts.WIDGET_SLOT)
+        self._inbox_add = reg(scripts.INBOX_ADD)
+        self._inbox_take = reg(scripts.INBOX_TAKE)
+        self._inbox_view = reg(scripts.INBOX_VIEW)
 
     async def ping(self) -> None:
         await self._kv.call("PING")
@@ -186,6 +192,7 @@ class Store:
                     rate_bucket,
                     rate_ttl,
                     LAST_USED_WRITE_INTERVAL_SECONDS,
+                    _score(now - self._limits.unread_inbox_ttl_seconds),
                 ]
             )
         )
@@ -199,7 +206,9 @@ class Store:
         else:
             account_id, _, key_id = rest.partition(":")
             principal = AgentPrincipal(AccountId(account_id), KeyId(key_id))
-        return AuthResult(principal, limited=code != 1)
+        if code != 1:
+            return AuthResult(principal, limited=True)
+        return AuthResult(principal, inbox_unread=integer(reply[2]))
 
     async def hit(self, bucket: str, ttl: int) -> int:
         return integer(await self._rate_hit(keys=[self.keys.rate(bucket)], args=[ttl]))
@@ -594,6 +603,46 @@ class Store:
         """Remove an ID that has no pending or closed question from one of the expiry indexes."""
         key = self.keys.questions_due if index == "due" else self.keys.questions_closed
         await self._kv.call("ZREM", key, question_id)
+
+    # Inbox
+
+    def _inbox_cutoffs(self, now: float) -> tuple[str, str]:
+        """The scores below which an unread item, and a read item, is past its lifetime."""
+        limits = self._limits
+        return _score(now - limits.unread_inbox_ttl_seconds), _score(now - limits.read_inbox_ttl_seconds)
+
+    async def add_inbox_item(self, account_id: AccountId, key_id: KeyId, item: InboxItem, now: float) -> int | None:
+        """Put an item in the inbox of a key. Returns the unread count, or None if the account has no such key."""
+        reply = await self._inbox_add(
+            args=[
+                self._p,
+                account_id,
+                key_id,
+                item.id,
+                item.model_dump_json(exclude={"read_at"}),
+                _score(item.created_at),
+                self._limits.max_unread_inbox_items,
+                *self._inbox_cutoffs(now),
+            ]
+        )
+        unread = integer(reply)
+        return None if unread < 0 else unread
+
+    async def take_inbox(self, key_id: KeyId, count: int, *, mark_read: bool, now: float) -> tuple[list[str], int]:
+        """The JSON of the oldest unread items, and the unread count after the call."""
+        reply = items(
+            await self._inbox_take(
+                args=[self._p, key_id, count, "1" if mark_read else "0", _score(now), *self._inbox_cutoffs(now)]
+            )
+        )
+        return texts(reply[1:]), integer(reply[0])
+
+    async def view_inbox(self, key_id: KeyId, count: int, now: float) -> tuple[list[tuple[str, float | None]], int]:
+        """The newest items as (JSON, read time), newest first, and the unread count."""
+        reply = items(await self._inbox_view(args=[self._p, key_id, count, *self._inbox_cutoffs(now)]))
+        flat = texts(reply[1:])
+        rows = [(doc, float(read_at) if read_at else None) for doc, read_at in zip(flat[::2], flat[1::2], strict=True)]
+        return rows, integer(reply[0])
 
     def _question_index(self, scope: TaskScope) -> str:
         match scope:

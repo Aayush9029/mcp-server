@@ -95,15 +95,23 @@ class EventHub:
         self._listeners.setdefault(channel, set()).add(queue)
         try:
             await self._reconcile()
-            async with asyncio.timeout(self._timing.confirm_seconds):
-                await asyncio.shield(self._confirmation(channel))
-        except TimeoutError as exc:
-            self._detach(channel, queue)
-            raise StoreUnavailable from exc
+            await self._confirmed_in_time(self._confirmation(channel))
         except BaseException:
             self._detach(channel, queue)
             raise
         return Subscription(account_id, queue, self._timing.ping_seconds, lambda: self._detach(channel, queue))
+
+    async def _confirmed_in_time(self, confirmed: asyncio.Future[None]) -> None:
+        """Wait for the store to confirm a subscription. The limit is on the injected clock, as each other wait."""
+        limit = asyncio.ensure_future(self._clock.sleep(self._timing.confirm_seconds))
+        try:
+            # `wait` does not cancel `confirmed`, which the other streams of the channel also wait for.
+            await asyncio.wait({confirmed, limit}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            limit.cancel()
+        if not confirmed.done():
+            raise StoreUnavailable
+        confirmed.result()
 
     def _confirmation(self, channel: str) -> asyncio.Future[None]:
         confirmed = self._confirmed.get(channel)

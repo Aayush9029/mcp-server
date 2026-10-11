@@ -21,11 +21,23 @@ from mcp_client_server.errors import AppError, NotFound, RateLimited, StoreUnava
 from mcp_client_server.ids import QuestionId, TaskId
 from mcp_client_server.limits import Limits
 from mcp_client_server.mcp import views
-from mcp_client_server.mcp.endpoint import McpEndpoint, current_principal, optional_principal
+from mcp_client_server.mcp.endpoint import (
+    McpEndpoint,
+    current_principal,
+    inbox_unread,
+    optional_principal,
+    set_inbox_unread,
+)
 from mcp_client_server.mcp.views import DeleteOut, OpenTasksOut, TaskListOut, TaskOut
 from mcp_client_server.models import (
     CLOSED_STATUSES,
+    AgentList,
     Description,
+    InboxItem,
+    InboxLimit,
+    InboxList,
+    MessageCreate,
+    MessageText,
     NotifyBody,
     NotifyInput,
     NotifyResult,
@@ -45,6 +57,7 @@ from mcp_client_server.models import (
     split_commas,
 )
 from mcp_client_server.services import Services
+from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.keys import KeyService
 from mcp_client_server.services.questions import QuestionService
 from mcp_client_server.services.tasks import TaskService
@@ -62,7 +75,10 @@ def instructions(app_name: str) -> str:
         "2. Set `status` to `in_progress` when you start, and keep `status_note` and `progress` current.\n"
         "3. Set `status` to `done` when the work is complete and verified.\n"
         "4. Use `notify_user` only when the person must act or must know now.\n"
-        "5. Use `ask_user` when a decision belongs to the person, and do not guess the answer."
+        "5. Use `ask_user` when a decision belongs to the person, and do not guess the answer.\n"
+        "6. Call `check_inbox` when you start and after each unit of work. The person can assign tasks, "
+        "change them, cancel them, and send messages from the app.\n"
+        "7. A `task_changed` item with a `cancelled` status means: stop that work."
     )
 
 
@@ -83,14 +99,16 @@ PriorityFilter = Annotated[
 ]
 
 
+def _text(text: str) -> TextContent:
+    return TextContent(type="text", text=text + views.inbox_note(inbox_unread()))
+
+
 def _result(text: str, structured: BaseModel) -> CallToolResult:
-    return CallToolResult(
-        content=[TextContent(type="text", text=text)], structured_content=structured.model_dump(mode="json")
-    )
+    return CallToolResult(content=[_text(text)], structured_content=structured.model_dump(mode="json", by_alias=True))
 
 
 def _error(text: str) -> CallToolResult:
-    return CallToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+    return CallToolResult(content=[_text(text)], is_error=True)
 
 
 def _explain(exc: AppError) -> str:
@@ -137,9 +155,11 @@ WaitArg = Annotated[
 
 
 class Tools:
-    def __init__(self, tasks: TaskService, questions: QuestionService) -> None:
+    def __init__(self, tasks: TaskService, questions: QuestionService, inbox: InboxService, keys: KeyService) -> None:
         self._tasks = tasks
         self._questions = questions
+        self._inbox = inbox
+        self._keys = keys
 
     @corrective
     async def create_task(
@@ -169,15 +189,18 @@ class Tools:
         ),
         cursor: Annotated[str | None, Field(description="The `next_cursor` of the previous page.")] = None,
     ) -> Annotated[CallToolResult, TaskListOut]:
+        principal = current_principal()
         page = await self._tasks.page(
-            current_principal(), statuses=status or (), priorities=priority or (), limit=limit, cursor=cursor
+            principal, statuses=status or (), priorities=priority or (), limit=limit, cursor=cursor
         )
-        out = TaskListOut(tasks=[TaskOut.of(task) for task in page.tasks], next_cursor=page.next_cursor)
-        return _result(views.listing(page.tasks, page.next_cursor), out)
+        tasks = await self._tasks.seen(principal, page.tasks)
+        out = TaskListOut(tasks=[TaskOut.of(task) for task in tasks], next_cursor=page.next_cursor)
+        return _result(views.listing(tasks, page.next_cursor), out)
 
     @corrective
     async def get_task(self, task_id: TaskIdArg) -> Annotated[CallToolResult, TaskOut]:
-        task = await self._tasks.get(current_principal(), task_id)
+        principal = current_principal()
+        (task,) = await self._tasks.seen(principal, [await self._tasks.get(principal, task_id)])
         return _result(views.detail(task), TaskOut.of(task))
 
     @corrective
@@ -221,7 +244,9 @@ class Tools:
                 fields[name] = None
         if not fields:
             return _error("No field to change. Send one or more of: " + ", ".join(given) + ".")
-        task = await self._tasks.update(current_principal(), task_id, TaskPatch.model_validate(fields))
+        principal = current_principal()
+        updated = await self._tasks.update(principal, task_id, TaskPatch.model_validate(fields))
+        (task,) = await self._tasks.seen(principal, [updated])
         return _result(f"Updated task {views.line(task)}", TaskOut.of(task))
 
     @corrective
@@ -285,6 +310,42 @@ class Tools:
     ) -> Annotated[CallToolResult, Question]:
         question = await self._questions.get(current_principal(), question_id, wait=wait_seconds)
         return _result(views.question_summary(question), question)
+
+    @corrective
+    async def check_inbox(
+        self,
+        wait_seconds: Annotated[
+            WaitSeconds,
+            Field(description="Seconds to hold the call for a new item, 0 to 50. With 0 the call returns at once."),
+        ] = 0,
+        limit: Annotated[InboxLimit, Field(description="Maximum number of items, 1 to 50.")] = (
+            limits.INBOX_LIMIT_DEFAULT
+        ),
+        mark_read: Annotated[  # noqa: FBT002  the SDK gives tool arguments by name
+            bool, Field(description="If true, the returned items become read and do not come again.")
+        ] = True,
+    ) -> Annotated[CallToolResult, InboxList]:
+        page = await self._inbox.take(current_principal(), wait=wait_seconds, limit=limit, mark_read=mark_read)
+        set_inbox_unread(page.unread)
+        return _result(views.inbox_listing(page.items), InboxList(items=page.items, unread=page.unread))
+
+    @corrective
+    async def send_message(
+        self,
+        to: Annotated[
+            str,
+            Field(description="The key ID or the exact label of a different key of this account, from list_agents."),
+        ],
+        text: Annotated[MessageText, Field(description="The message, 2,000 characters at most.")],
+        task_id: Annotated[TaskId | None, Field(description="One of your tasks that the message is about.")] = None,
+    ) -> Annotated[CallToolResult, InboxItem]:
+        item = await self._inbox.send(current_principal(), MessageCreate(to=to, text=text, task_id=task_id))
+        return _result(f"Message {item.id} is in the inbox of that agent.", item)
+
+    @corrective
+    async def list_agents(self) -> Annotated[CallToolResult, AgentList]:
+        agents = await self._keys.agents(current_principal())
+        return _result(views.agent_listing(agents), AgentList(agents=agents))
 
 
 class Resources:
@@ -398,7 +459,8 @@ def build_mcp_server(services: Services) -> MCPServer:
         subscriptions=False,
         middleware=[ClientRecorder(services.keys)],
     )
-    _add_tools(server, Tools(services.tasks, services.questions), services.limits)
+    tools = Tools(services.tasks, services.questions, services.inbox, services.keys)
+    _add_tools(server, tools, services.limits)
     _add_resources(server, Resources(services.tasks))
     _add_prompts(server, Prompts(services.tasks))
     return server
@@ -436,6 +498,16 @@ def _descriptions(per_hour: int) -> dict[str, str]:
             "Get a question that you asked with ask_user, with its `status` and its `answer`. "
             "For a pending question, the call waits up to `wait_seconds` for the answer."
         ),
+        "check_inbox": (
+            "Read what the person and other agents sent to you: tasks that the person assigned, changed, or "
+            "deleted in the app, answers, and messages. Call it when you start and after each unit of work. "
+            "With `wait_seconds`, the call waits for a new item."
+        ),
+        "send_message": (
+            "Send a message to a different agent of the same person. The message goes into the inbox of that agent. "
+            "It sends no notification to the person: use notify_user or ask_user for that."
+        ),
+        "list_agents": "List the agents (API keys) of this person, with the one that you are.",
     }
 
 
@@ -463,6 +535,9 @@ def _add_tools(server: MCPServer, tools: Tools, limits: Limits) -> None:
         (tools.notify_user, _hints("Notify user")),
         (tools.ask_user, _hints("Ask user")),
         (tools.get_answer, _hints("Get answer", read_only=True, idempotent=True)),
+        (tools.check_inbox, _hints("Check inbox")),
+        (tools.send_message, _hints("Send message")),
+        (tools.list_agents, _hints("List agents", read_only=True, idempotent=True)),
     ]
     for tool, annotations in catalog:
         server.add_tool(

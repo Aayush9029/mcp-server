@@ -1,7 +1,7 @@
 import base64
 import json
 import math
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from typing import assert_never
@@ -27,8 +27,10 @@ from mcp_client_server.models import (
     TaskPatch,
 )
 from mcp_client_server.push import PushDispatcher, TaskChange
+from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.questions import QuestionService
 from mcp_client_server.services.scope import own_scope
+from mcp_client_server.services.seen import SeenMarker
 from mcp_client_server.store import AccountTasks, Cursor, KeyTasks, Store, StoredTask, TaskScope
 
 _WRITE_ATTEMPTS = 8
@@ -115,6 +117,7 @@ def apply_patch(task: Task, patch: TaskPatch, at: float) -> tuple[Task, frozense
         # Two writes in one microsecond must still sort in write order.
         updated_at=max(at, round(task.updated_at + 1e-6, 6)),
         completed_at=completed_at,
+        seen_at=task.seen_at,
     )
     return patched, changed
 
@@ -125,6 +128,8 @@ class TaskService:
         store: Store,
         push: PushDispatcher,
         questions: QuestionService,
+        inbox: InboxService,
+        seen: SeenMarker,
         clock: Clock,
         ids: IdSource,
         limits: Limits,
@@ -132,6 +137,8 @@ class TaskService:
         self._store = store
         self._push = push
         self._questions = questions
+        self._inbox = inbox
+        self._seen = seen
         self._clock = clock
         self._ids = ids
         self._limits = limits
@@ -162,11 +169,15 @@ class TaskService:
             created_at=at,
             updated_at=at,
             completed_at=at if done else None,
+            # The agent that makes a task has it. A task from the app waits for the agent to get it.
+            seen_at=at if by_agent else None,
         )
         status = await self._store.create_task(principal.account_id, task, frames.task_created(task))
         match status:
             case "ok":
                 self._push.task_changed(principal.account_id, TaskChange("created", task, _NO_CHANGE, by_agent))
+                if not by_agent:
+                    await self._inbox.task_assigned(principal.account_id, task)
                 return task
             case "limit":
                 raise LimitReached(self._open_limit_message)
@@ -246,6 +257,8 @@ class TaskService:
             match status:
                 case "ok":
                     self._push.task_changed(principal.account_id, TaskChange("updated", task, changed, by_agent))
+                    if not by_agent:
+                        await self._inbox.task_changed(principal.account_id, stored.task, task, changed)
                     return task
                 case "limit":
                     raise LimitReached(self._open_limit_message)
@@ -266,8 +279,14 @@ class TaskService:
                     principal.account_id, TaskChange("deleted", task, _NO_CHANGE, by_agent, deleted.activities)
                 )
                 await self._questions.cancel_for_deleted_task(principal.account_id, deleted.pending_questions)
+                if not by_agent:
+                    await self._inbox.task_deleted(principal.account_id, task)
                 return task
         raise Conflict("The task changed at the same time. Try again.")
+
+    async def seen(self, principal: AgentPrincipal, tasks: Sequence[Task]) -> list[Task]:
+        """Note that the agent got these tasks. A surface calls this for the tasks that it gives to an agent."""
+        return await self._seen.tasks(principal, tasks)
 
     async def notify_user(self, principal: AgentPrincipal, data: NotifyInput) -> NotifyResult:
         task = await self.get(principal, data.task_id) if data.task_id else None

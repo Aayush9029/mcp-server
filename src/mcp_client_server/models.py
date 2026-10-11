@@ -6,6 +6,7 @@ from typing import Annotated, Literal, get_args
 
 from pydantic import (
     AfterValidator,
+    AliasChoices,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -18,7 +19,7 @@ from pydantic import (
 from mcp_client_server import limits
 from mcp_client_server.credentials import Secret
 from mcp_client_server.errors import ErrorCode
-from mcp_client_server.ids import AccountId, DeviceId, KeyId, QuestionId, TaskId
+from mcp_client_server.ids import AccountId, DeviceId, InboxItemId, KeyId, QuestionId, TaskId
 
 Status = Literal["todo", "in_progress", "done", "cancelled"]
 Priority = Literal["low", "medium", "high", "urgent"]
@@ -28,6 +29,7 @@ ApnsEnvironment = Literal["production", "sandbox"]
 PatchField = Literal["title", "description", "status", "priority", "notify", "progress", "status_note"]
 QuestionKind = Literal["confirm", "choice", "text"]
 QuestionStatus = Literal["pending", "answered", "expired", "cancelled"]
+InboxKind = Literal["task_assigned", "task_changed", "task_deleted", "answer", "message"]
 
 STATUSES: tuple[Status, ...] = get_args(Status)
 PRIORITIES: tuple[Priority, ...] = get_args(Priority)
@@ -76,6 +78,8 @@ Option = Annotated[str, StringConstraints(min_length=1, max_length=limits.OPTION
 Answer = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=limits.ANSWER_MAX)]
 ExpiresIn = Annotated[int, Field(ge=limits.EXPIRES_IN_MIN, le=limits.EXPIRES_IN_MAX)]
 WaitSeconds = Annotated[int, Field(ge=0, le=limits.WAIT_MAX_SECONDS)]
+MessageText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=limits.MESSAGE_MAX)]
+InboxLimit = Annotated[int, Field(ge=1, le=limits.INBOX_LIMIT_MAX)]
 
 ClientDeviceId = Annotated[
     DeviceId, StringConstraints(pattern=r"^dev_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -104,6 +108,8 @@ class Task(_Object):
     created_at: float
     updated_at: float
     completed_at: float | None
+    # When the agent of the key first got the task. A task from before this field has no value.
+    seen_at: float | None = None
 
     @property
     def is_open(self) -> bool:
@@ -168,6 +174,40 @@ class Question(_Object):
     created_at: float
     answered_at: float | None
     expires_at: float
+
+
+class PersonSender(_Object):
+    type: Literal["person"] = "person"
+
+
+class AgentSender(_Object):
+    type: Literal["agent"] = "agent"
+    key_id: KeyId
+    label: str
+
+
+class InboxItem(_Object):
+    model_config = ConfigDict(frozen=True, serialize_by_alias=True)
+
+    id: InboxItemId
+    kind: InboxKind
+    # `from` is a Python keyword, so the field has a different name in the code.
+    sender: PersonSender | AgentSender = Field(
+        discriminator="type", serialization_alias="from", validation_alias=AliasChoices("from", "sender")
+    )
+    task_id: TaskId | None
+    question_id: QuestionId | None
+    text: str
+    created_at: float
+    read_at: float | None = None
+
+
+class Agent(_Object):
+    key_id: KeyId
+    label: str
+    is_self: bool
+    last_client: ClientInfo | None
+    last_used_at: float | None
 
 
 class _Request(BaseModel):
@@ -274,6 +314,15 @@ class QuestionAnswer(_Request):
     answer: Answer
 
 
+class MessageCreate(_Request):
+    """`key_id` with an account credential, `to` with an API key. The service applies that rule."""
+
+    key_id: KeyId | None = None
+    to: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)] | None = None
+    text: MessageText
+    task_id: TaskId | None = None
+
+
 class LiveActivityInput(_Request):
     device_id: ClientDeviceId
     push_token: HexToken
@@ -299,6 +348,15 @@ class KeyList(_Object):
 
 class QuestionList(_Object):
     questions: list[Question]
+
+
+class InboxList(_Object):
+    items: list[InboxItem]
+    unread: int
+
+
+class AgentList(_Object):
+    agents: list[Agent]
 
 
 class TaskList(_Object):

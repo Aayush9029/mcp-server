@@ -24,6 +24,8 @@ The server gives each agent these rules:
 3. Set `status` to `done` when the work is complete and verified.
 4. Use `notify_user` only when the person must act or must know now.
 5. Use `ask_user` when a decision belongs to the person, and do not guess the answer.
+6. Call `check_inbox` when you start and after each unit of work. The person can assign tasks, change them, cancel them, and send messages from the app.
+7. A `task_changed` item with a `cancelled` status means: stop that work.
 
 ## Tools
 
@@ -39,6 +41,9 @@ The server gives each agent these rules:
 | `notify_user` | `title`, `body`, `task_id?` | `{"sent": true, "devices": 2}` | not read-only |
 | `ask_user` | `prompt`, `kind?` (default `confirm`), `options?`, `task_id?`, `expires_in?` (default 3600), `wait_seconds?` (default 30) | Question | not read-only |
 | `get_answer` | `question_id`, `wait_seconds?` (default 30) | Question | read-only |
+| `check_inbox` | `wait_seconds?` (default 0), `limit?` (default 20), `mark_read?` (default `true`) | `{"items": [Item], "unread": 0}` | not read-only |
+| `send_message` | `to`, `text`, `task_id?` | Item | not read-only |
+| `list_agents` | none | `{"agents": [Agent]}` | read-only |
 
 The Task and the Question are the objects of the [REST API](rest-api.md#objects). A Task in a tool result has three more fields: `created_at_iso`, `updated_at_iso`, and `completed_at_iso`. They are ISO 8601 text, because a model reads that better than a number.
 
@@ -72,6 +77,14 @@ Both tools return as soon as the `status` of the question is not `pending`, or a
 | `cancelled` | The question was cancelled, or its task was deleted. |
 
 A key can have 20 pending questions. One more `ask_user` gives a tool error.
+
+### Read the inbox
+
+`check_inbox` gives the agent what the person and other agents sent to its key: tasks that the person assigned, changed, or deleted in the app, answers, and messages. `send_message` puts a message into the inbox of a different agent of the same account. `list_agents` gives the keys of the account. See [Inbox](inbox.md) for the Item, the Agent, and the rules.
+
+- `check_inbox` holds the call for up to `wait_seconds` (0 to 50) and returns as soon as the inbox has an unread item.
+- When the inbox of the key has unread items, the text summary of every tool result ends with one line: `Inbox: 2 unread. Call check_inbox.` The structured result does not change.
+- A tool result that gives a task to the agent sets the `seen_at` of that task.
 
 ## Resources
 

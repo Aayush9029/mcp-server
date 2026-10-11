@@ -7,6 +7,7 @@ KeyId = NewType("KeyId", str)
 TaskId = NewType("TaskId", str)
 DeviceId = NewType("DeviceId", str)
 QuestionId = NewType("QuestionId", str)
+InboxItemId = NewType("InboxItemId", str)
 
 _CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz"
 
@@ -19,6 +20,8 @@ class IdSource(Protocol):
     def task_id(self) -> TaskId: ...
 
     def question_id(self) -> QuestionId: ...
+
+    def inbox_id(self) -> InboxItemId: ...
 
 
 def ulid() -> str:
@@ -39,3 +42,6 @@ class UlidSource:
 
     def question_id(self) -> QuestionId:
         return QuestionId(f"qst_{ulid()}")
+
+    def inbox_id(self) -> InboxItemId:
+        return InboxItemId(f"inb_{ulid()}")

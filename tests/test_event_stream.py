@@ -14,7 +14,7 @@ from mcp_client_server.events import EventHub, frames
 from mcp_client_server.ids import AccountId
 from mcp_client_server.services import Services
 from mcp_client_server.store import KeySpace, RedisSubscriber, event_client
-from tests.support import Api, FakeClock, Headers, Json, RawStore
+from tests.support import SIGNAL_SECONDS, Api, FakeClock, Headers, Json, RawStore
 
 type Event = tuple[str, Json | None]
 
@@ -27,7 +27,7 @@ class Stream:
     async def next(self) -> Event | None:
         """The next event, or None when the server closes the stream."""
         name, data = "", ""
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(SIGNAL_SECONDS):
             async for line in self._lines:
                 if line.startswith("event: "):
                     name = line.removeprefix("event: ")
@@ -55,7 +55,7 @@ async def live_url(app: FastAPI) -> AsyncIterator[str]:
 @asynccontextmanager
 async def events(live_url: str, auth: Headers) -> AsyncGenerator[Stream]:
     async with (
-        httpx2.AsyncClient(base_url=live_url, timeout=10) as http,
+        httpx2.AsyncClient(base_url=live_url, timeout=SIGNAL_SECONDS) as http,
         http.stream("GET", "/v1/events", headers=auth) as response,
     ):
         assert response.status_code == 200, await response.aread()
@@ -99,6 +99,8 @@ async def test_each_change_arrives_as_the_event_of_the_contract_in_order(live_ur
 
         await api.http.delete(f"/v1/tasks/{task['id']}", headers=account)
         assert await stream.next() == ("task.deleted", {"task_id": task["id"], "key_id": key_info["id"]})
+        # The person deleted a task of the agent, so the inbox of the key has one item for the agent.
+        assert await stream.next() == ("inbox.updated", {"key_id": key_info["id"], "unread": 1})
 
         await api.http.delete(f"/v1/keys/{key_info['id']}", headers=account)
         assert await stream.next() == ("key.deleted", {"key_id": key_info["id"]})
@@ -135,7 +137,7 @@ async def test_a_client_that_leaves_frees_its_stream_and_can_connect_again(
     account, key, _ = await api.agent()
     async with events(live_url, account):
         assert services.events.stream_count == 1
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(SIGNAL_SECONDS):
         while services.events.stream_count:  # noqa: ASYNC110  the server sees the closed socket a moment later
             await asyncio.sleep(0.005)
 
@@ -159,11 +161,13 @@ async def test_a_killed_subscriber_connection_closes_the_streams_and_the_hub_con
     try:
         subscription = await hub.open(account_id)
         await raw.kill_subscribers()
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(SIGNAL_SECONDS):
             assert [frame async for frame in subscription.stream()] == [frames.ready(account_id)]
 
+        # The stream ends before the hub sleeps for its next try. The clock moves only after that sleep started.
+        await clock.sleeping(1.0)
         clock.advance(1.0)
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(SIGNAL_SECONDS):
             again = await hub.open(account_id)
             await raw.publish(keys.channel(account_id), frames.account_deleted())
             assert [frame async for frame in again.stream()] == [frames.ready(account_id), frames.account_deleted()]

@@ -74,7 +74,8 @@ The Apple app and scripts use the routes under `/v1`. Read [Overview](overview.m
   "source": "agent",
   "created_at": 1760112000.412,
   "updated_at": 1760112300.9,
-  "completed_at": null
+  "completed_at": null,
+  "seen_at": 1760112010.2
 }
 ```
 
@@ -87,6 +88,7 @@ The Apple app and scripts use the routes under `/v1`. Read [Overview](overview.m
 | `status_note` | One short line that says what the agent does now, or `null` |
 | `source` | `agent` if an API key made the task, `app` if the account made it |
 | `completed_at` | Set when `status` becomes `done`. `null` when the status is a different one. |
+| `seen_at` | When the agent of the key first got the task, or `null`. See [Inbox](inbox.md#task-field). |
 
 ### Question
 
@@ -268,6 +270,17 @@ If two answers arrive at the same time, one gets `200` and the other gets `409`.
 ### Cancel a question
 
 `DELETE` gives `204` for a question that is `pending` or already `cancelled`. It gives `409` for a question that is `answered` or `expired`.
+
+## Inbox and messages
+
+| Method | Path | Auth | Result |
+|--------|------|------|--------|
+| `GET` | `/v1/inbox` | API key | `200 {"items": [Item], "unread": 0}` |
+| `POST` | `/v1/messages` | account or API key | `201 Item` |
+| `GET` | `/v1/keys/{key_id}/inbox` | account | `200 {"items": [Item], "unread": 2}` |
+| `GET` | `/v1/agents` | API key | `200 {"agents": [Agent]}` |
+
+When the person creates, changes, or deletes a task of a key with the account token, or answers a question, the server adds an item to the inbox of that key. See [Inbox](inbox.md) for the objects, the query parameters, and the rules.
 
 ## Live Activities
 

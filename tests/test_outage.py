@@ -16,10 +16,11 @@ import pytest
 from redis.asyncio import Redis
 
 from mcp_client_server.config import Settings
+from mcp_client_server.errors import StoreUnavailable
 from mcp_client_server.main import create_app
 from mcp_client_server.services import Services
 from tests.conftest import Connect, free_port
-from tests.support import Api, FakeClock, Headers, RecordingPushSender, Running, SequentialIds, error
+from tests.support import SIGNAL_SECONDS, Api, FakeClock, Headers, RecordingPushSender, Running, SequentialIds, error
 
 
 class Outage(Protocol):
@@ -138,17 +139,27 @@ def unavailable(response: httpx2.Response) -> None:
     assert int(response.headers["retry-after"]) > 0
 
 
-async def stream_opens(running: Running, account: Headers) -> bool:
-    """Open the event stream of the hub and close it again. False while the subscriber has no connection."""
+async def stream_opens(running: Running, account: Headers) -> None:
+    """Open the event stream of the hub and close it again.
+
+    After an outage the subscriber sleeps one second of the clock before each try. This helper moves the clock
+    when, and only when, that sleep has started. Thus no try is lost, and the helper needs no real wait.
+    """
     account_id = await running.api.account_id(account)
-    running.clock.advance(1.0)
-    try:
-        subscription = await running.services.events.open(account_id)
-    except Exception:  # noqa: BLE001  any failure means "not yet"; the test has a time limit
-        await asyncio.sleep(0.01)
-        return False
-    subscription.close()
-    return True
+    async with asyncio.timeout(SIGNAL_SECONDS):
+        while True:
+            attempt = asyncio.create_task(running.services.events.open(account_id))
+            while not attempt.done():
+                retry = asyncio.create_task(running.clock.sleeping(1.0))
+                await asyncio.wait({attempt, retry}, return_when=asyncio.FIRST_COMPLETED)
+                if retry.done() and not attempt.done():
+                    running.clock.advance(1.0)
+                retry.cancel()
+            try:
+                attempt.result().close()
+            except StoreUnavailable:
+                continue
+            return
 
 
 async def test_each_surface_gives_503_while_the_store_is_down_and_works_again_after(
@@ -159,7 +170,7 @@ async def test_each_surface_gives_503_while_the_store_is_down_and_works_again_af
     api, http = running.api, running.http
     account, key, _ = await api.agent()
     task = await api.task(key)
-    assert await stream_opens(running, account)
+    await stream_opens(running, account)
     caplog.set_level(logging.WARNING)
 
     await outage.begin()
@@ -182,9 +193,7 @@ async def test_each_surface_gives_503_while_the_store_is_down_and_works_again_af
     assert (await api.rpc(key, "tools/call", call, headers={"Mcp-Name": "create_task"})).status_code == 200
     titles = {item["title"] for item in (await http.get("/v1/tasks", headers=account)).json()["tasks"]}
     assert titles == {"Write tests", "During the outage"}
-    async with asyncio.timeout(5):
-        while not await stream_opens(running, account):
-            pass
+    await stream_opens(running, account)
 
 
 async def test_the_server_starts_while_the_store_is_down_and_serves_when_the_store_comes_up(
@@ -200,12 +209,10 @@ async def test_the_server_starts_while_the_store_is_down_and_serves_when_the_sto
     unavailable(await running.api.rpc({"Authorization": "Bearer mck_" + "a" * 43}, "tools/list"))
     # The subscriber tries again each second and does not fill the log.
     for _ in range(5):
+        await running.clock.sleeping(1.0)
         running.clock.advance(1.0)
-        await asyncio.sleep(0.01)
 
     await outage.end()
     account, key, _ = await running.api.agent()
     assert (await running.api.rpc(key, "tools/list")).status_code == 200
-    async with asyncio.timeout(5):
-        while not await stream_opens(running, account):
-            pass
+    await stream_opens(running, account)

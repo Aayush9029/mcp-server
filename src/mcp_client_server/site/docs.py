@@ -18,7 +18,7 @@ from pygments.formatters import HtmlFormatter
 from pygments.util import ClassNotFound
 
 # Pages in this list come first, in this order. All other pages follow in alphabetical order.
-ORDER = ("overview", "quickstart", "mcp", "rest-api", "events", "push", "app-integrity", "self-hosting")
+ORDER = ("overview", "quickstart", "mcp", "rest-api", "events", "inbox", "push", "app-integrity", "self-hosting")
 
 _SUMMARY_MAX = 180
 _PLAIN_LANGUAGES = frozenset({"", "text", "txt", "plain", "plaintext", "none"})

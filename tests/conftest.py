@@ -50,9 +50,18 @@ def _wait_for_port(port: int) -> None:
     raise RuntimeError("the test store did not start")
 
 
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """TEST_REPEAT=50 runs each selected test 50 times in one process, to find a test that fails only sometimes."""
+    repeat = int(os.environ.get("TEST_REPEAT", "1"))
+    if repeat > 1:
+        metafunc.fixturenames.append("repeat_number")
+        metafunc.parametrize("repeat_number", range(repeat))
+
+
 @pytest.fixture(scope="session")
-def anyio_backend() -> str:
-    return "asyncio"
+def anyio_backend() -> tuple[str, dict[str, bool]]:
+    """asyncio. TEST_LOOP=uvloop runs the tests on uvloop, the event loop of the server in production."""
+    return "asyncio", {"use_uvloop": os.environ.get("TEST_LOOP") == "uvloop"}
 
 
 @pytest.fixture(scope="session")

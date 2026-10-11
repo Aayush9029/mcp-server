@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pydantic import BaseModel
 
 from mcp_client_server.ids import TaskId
-from mcp_client_server.models import Question, Task
+from mcp_client_server.models import Agent, InboxItem, Question, Task
 
 _DESCRIPTION_PREVIEW = 4000
 
@@ -35,6 +35,7 @@ class TaskOut(Task):
             created_at=task.created_at,
             updated_at=task.updated_at,
             completed_at=task.completed_at,
+            seen_at=task.seen_at,
             created_at_iso=iso(task.created_at),
             updated_at_iso=iso(task.updated_at),
             completed_at_iso=None if task.completed_at is None else iso(task.completed_at),
@@ -68,6 +69,31 @@ def question_summary(question: Question) -> str:
             return f"Question {question.id} expired with no answer. Do not guess the answer."
         case "cancelled":
             return f"Question {question.id} was cancelled."
+
+
+def inbox_note(unread: int) -> str:
+    """The line that ends the text of each tool result while the inbox has unread items."""
+    return f"\nInbox: {unread} unread. Call check_inbox." if unread > 0 else ""
+
+
+def _inbox_line(item: InboxItem) -> str:
+    sender = "the person" if item.sender.type == "person" else f"{item.sender.label} ({item.sender.key_id})"
+    about = "".join(
+        f", {name} {value}" for name, value in (("task", item.task_id), ("question", item.question_id)) if value
+    )
+    return f"{item.id} [{item.kind}] from {sender}{about}: {item.text}"
+
+
+def inbox_listing(items: list[InboxItem]) -> str:
+    if not items:
+        return "The inbox has no unread items."
+    count = "1 item" if len(items) == 1 else f"{len(items)} items"
+    return "\n".join([f"{count}, oldest first.", *(_inbox_line(item) for item in items)])
+
+
+def agent_listing(agents: list[Agent]) -> str:
+    lines = [f"{agent.key_id} {agent.label}{' (you)' if agent.is_self else ''}" for agent in agents]
+    return "\n".join(["The keys of this account. Use a key ID or a label as `to` of send_message.", *lines])
 
 
 def line(task: Task) -> str:

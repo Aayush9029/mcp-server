@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from mcp_client_server.clock import Clock
 from mcp_client_server.credentials import Principal, Secret, hash_secret, looks_like_credential
 from mcp_client_server.errors import RateLimited, Unauthorized
@@ -5,6 +7,13 @@ from mcp_client_server.store import Store
 
 _MINUTE = 60
 _HOUR = 3600
+
+
+@dataclass(frozen=True, slots=True)
+class Identity:
+    principal: Principal
+    # Unread inbox items of the key at the time of the request. 0 for an account.
+    inbox_unread: int
 
 
 class AuthService:
@@ -15,6 +24,9 @@ class AuthService:
         self._accounts_per_hour = accounts_per_hour
 
     async def authenticate(self, secret: Secret | None) -> Principal:
+        return (await self.identify(secret)).principal
+
+    async def identify(self, secret: Secret | None) -> "Identity":
         """Resolve a credential, count it against its rate limit, and note that the key was used."""
         if not secret or not looks_like_credential(secret):
             raise Unauthorized("Missing or invalid credential.")
@@ -31,7 +43,7 @@ class AuthService:
             raise Unauthorized("Missing or invalid credential.")
         if result.limited:
             raise RateLimited("Too many requests. Slow down.", _MINUTE - int(at % _MINUTE))
-        return result.principal
+        return Identity(result.principal, result.inbox_unread)
 
     async def limit_account_creation(self, client_ip: str) -> None:
         await self._limit_by_address("ip", client_ip, "Too many new accounts from this address.")

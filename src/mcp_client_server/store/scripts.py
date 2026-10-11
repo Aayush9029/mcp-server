@@ -10,6 +10,17 @@ local p = ARGV[1]
 local STATUSES = {'todo', 'in_progress', 'done', 'cancelled'}
 local function is_open(s) return s == 'todo' or s == 'in_progress' end
 local QUESTION_STATUSES = {'pending', 'answered', 'expired', 'cancelled'}
+-- Deletes the inbox of one key.
+local function drop_inbox(keyk)
+  local base = keyk .. ':inbox'
+  local ids = redis.call('ZRANGE', base, 0, -1)
+  for i = 1, #ids, 500 do
+    local docs = {}
+    for j = i, math.min(i + 499, #ids) do docs[#docs + 1] = p .. ':inb:' .. ids[j] end
+    redis.call('DEL', unpack(docs))
+  end
+  redis.call('DEL', base, base .. ':unread', base .. ':read')
+end
 -- Deletes the questions of one key. `acck` is the account key, or false if the account indexes go away with it.
 local function drop_questions(keyk, acck)
   for _, s in ipairs(QUESTION_STATUSES) do
@@ -32,7 +43,8 @@ end
 """
 
 AUTH = """
--- ARGV: prefix, cred hash, now, rate limit, rate bucket, rate ttl, touch interval
+-- ARGV: prefix, cred hash, now, rate limit, rate bucket, rate ttl, touch interval, inbox unread cutoff
+-- Returns {0} for an unknown credential, {2, cred} above the rate limit, else {1, cred, unread inbox items}.
 local p = ARGV[1]
 local cred = redis.call('GET', p .. ':cred:' .. ARGV[2])
 if not cred then return {0} end
@@ -47,7 +59,11 @@ local key_id = string.match(cred, '^k:[^:]+:(.+)$')
 if key_id and redis.call('SET', p .. ':touch:' .. key_id, '1', 'NX', 'EX', ARGV[7]) then
   redis.call('HSET', p .. ':key:' .. key_id, 'last_used_at', ARGV[3])
 end
-return {1, cred}
+local unread = 0
+if key_id then
+  unread = redis.call('ZCOUNT', p .. ':key:' .. key_id .. ':inbox:unread', '(' .. ARGV[8], '+inf')
+end
+return {1, cred, unread}
 """
 
 RATE_HIT = """
@@ -181,6 +197,7 @@ for i = 1, #ids, 500 do
   for _, s in ipairs(STATUSES) do redis.call('ZREM', acc_tasks .. ':' .. s, unpack(chunk)) end
 end
 drop_questions(keyk, p .. ':acc:' .. aid)
+drop_inbox(keyk)
 redis.call('DEL', keyk, key_tasks, p .. ':touch:' .. kid, p .. ':cred:' .. h[2])
 for _, s in ipairs(STATUSES) do redis.call('DEL', key_tasks .. ':' .. s) end
 redis.call('ZREM', p .. ':acc:' .. aid .. ':keys', kid)
@@ -215,6 +232,7 @@ for _, kid in ipairs(redis.call('ZRANGE', acck .. ':keys', 0, -1)) do
   local kc = redis.call('HGET', keyk, 'cred')
   if kc then redis.call('DEL', p .. ':cred:' .. kc) end
   drop_questions(keyk, false)
+  drop_inbox(keyk)
   redis.call('DEL', keyk, keyk .. ':tasks', p .. ':touch:' .. kid)
   for _, s in ipairs(STATUSES) do redis.call('DEL', keyk .. ':tasks:' .. s) end
 end
@@ -510,3 +528,94 @@ end
 redis.call('SET', KEYS[2], '1', 'EX', ARGV[1] * 4)
 return 0
 """
+
+_INBOX = """
+-- Removes the items that are past their lifetime: an unread item by created_at, a read item by read_at.
+local function prune(p, base, unread_cutoff, read_cutoff)
+  for _, part in ipairs({{':unread', unread_cutoff}, {':read', read_cutoff}}) do
+    local old = redis.call('ZRANGEBYSCORE', base .. part[1], '-inf', part[2])
+    for i = 1, #old, 500 do
+      local chunk, docs = {}, {}
+      for j = i, math.min(i + 499, #old) do
+        chunk[#chunk + 1] = old[j]
+        docs[#docs + 1] = p .. ':inb:' .. old[j]
+      end
+      redis.call('DEL', unpack(docs))
+      redis.call('ZREM', base, unpack(chunk))
+      redis.call('ZREM', base .. part[1], unpack(chunk))
+    end
+  end
+end
+"""
+
+INBOX_ADD = (
+    _INBOX
+    + """
+-- ARGV: prefix, account, key, item, json, created_at, unread cap, unread cutoff, read cutoff
+-- Returns -1 if the account does not have the key, else the number of unread items.
+local p, aid, kid, id = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
+local keyk = p .. ':key:' .. kid
+if redis.call('HGET', keyk, 'account_id') ~= aid then return -1 end
+local base = keyk .. ':inbox'
+local unread = base .. ':unread'
+prune(p, base, ARGV[8], ARGV[9])
+-- The client sends a write again after a lost connection. The item is then there already.
+if redis.call('EXISTS', p .. ':inb:' .. id) == 0 then
+  redis.call('SET', p .. ':inb:' .. id, ARGV[5])
+  redis.call('ZADD', base, ARGV[6], id)
+  redis.call('ZADD', unread, ARGV[6], id)
+  local over = redis.call('ZCARD', unread) - tonumber(ARGV[7])
+  if over > 0 then
+    local oldest = redis.call('ZRANGE', unread, 0, over - 1)
+    for _, old in ipairs(oldest) do redis.call('DEL', p .. ':inb:' .. old) end
+    redis.call('ZREM', base, unpack(oldest))
+    redis.call('ZREM', unread, unpack(oldest))
+  end
+end
+return redis.call('ZCARD', unread)
+"""
+)
+
+INBOX_TAKE = (
+    _INBOX
+    + """
+-- ARGV: prefix, key, count, mark read ('1' or '0'), now, unread cutoff, read cutoff
+-- Returns {unread items after the call, json...} for the oldest unread items.
+local p = ARGV[1]
+local base = p .. ':key:' .. ARGV[2] .. ':inbox'
+local unread = base .. ':unread'
+prune(p, base, ARGV[6], ARGV[7])
+local ids = redis.call('ZRANGE', unread, 0, tonumber(ARGV[3]) - 1)
+local out = {0}
+for _, id in ipairs(ids) do
+  local doc = redis.call('GET', p .. ':inb:' .. id)
+  if doc then out[#out + 1] = doc end
+  if ARGV[4] == '1' or not doc then
+    redis.call('ZREM', unread, id)
+    if doc then redis.call('ZADD', base .. ':read', ARGV[5], id) else redis.call('ZREM', base, id) end
+  end
+end
+out[1] = redis.call('ZCARD', unread)
+return out
+"""
+)
+
+INBOX_VIEW = (
+    _INBOX
+    + """
+-- ARGV: prefix, key, count, unread cutoff, read cutoff
+-- Returns {unread items, json, read_at or '', json, read_at or '', ...}, newest first.
+local p = ARGV[1]
+local base = p .. ':key:' .. ARGV[2] .. ':inbox'
+prune(p, base, ARGV[4], ARGV[5])
+local out = {redis.call('ZCARD', base .. ':unread')}
+for _, id in ipairs(redis.call('ZREVRANGE', base, 0, tonumber(ARGV[3]) - 1)) do
+  local doc = redis.call('GET', p .. ':inb:' .. id)
+  if doc then
+    out[#out + 1] = doc
+    out[#out + 1] = redis.call('ZSCORE', base .. ':read', id) or ''
+  end
+end
+return out
+"""
+)

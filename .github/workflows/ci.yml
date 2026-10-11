@@ -5,16 +5,72 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  check:
+  lint:
+    name: Lint and types
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - run: shellcheck -s sh install.sh
+
+  test:
+    name: Tests (${{ matrix.store }}, ${{ matrix.loop }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - store: fakeredis
+            loop: asyncio
+          - store: valkey
+            loop: asyncio
+          - store: valkey
+            loop: uvloop
+    services:
+      valkey:
+        image: valkey/valkey:8.1
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_STORE: ${{ matrix.store == 'fakeredis' && 'fakeredis' || '' }}
+      TEST_REDIS_URL: ${{ matrix.store == 'valkey' && 'redis://localhost:6379/0' || '' }}
+      TEST_LOOP: ${{ matrix.loop }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run pytest
+
+  installer-macos:
+    name: Installer on macOS
+    runs-on: macos-latest
     env:
       TEST_STORE: fakeredis
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
       - run: uv sync --frozen
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pyright
-      - run: uv run pytest
+      - run: uv run pytest tests/test_install.py

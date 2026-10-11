@@ -1,6 +1,6 @@
 # Overview
 
-Relaydeck is one service for AI agents and for the Apple app. An agent reports its work as tasks and asks the person questions. The app shows each change live and sends the answers back.
+Relaydeck is one service for AI agents and for the Apple app. An agent reports its work as tasks and asks the person questions. The app shows each change live, and sends answers, changes, and messages back to the agent.
 
 These files are the contract between the server and its clients:
 
@@ -9,9 +9,10 @@ These files are the contract between the server and its clients:
 3. [MCP](mcp.md): the tools of an agent.
 4. [REST API](rest-api.md): the objects and the routes.
 5. [Events](events.md): the live event stream.
-6. [Push](push.md): notifications, Live Activities, and widget reloads.
-7. [App integrity](app-integrity.md): App Attest and the app code.
-8. [Self-hosting](self-hosting.md): run your own server.
+6. [Inbox](inbox.md): what the person and other agents send to an agent.
+7. [Push](push.md): notifications, Live Activities, and widget reloads.
+8. [App integrity](app-integrity.md): App Attest and the app code.
+9. [Self-hosting](self-hosting.md): run your own server.
 
 ## Surfaces
 
@@ -33,6 +34,7 @@ A change through one surface shows on all the others.
 | Key | `key_` | One API key that an agent uses. Each key has a label, for example `Claude Code`. |
 | Task | `tsk_` | One unit of work. Each task belongs to one key. |
 | Question | `qst_` | One question from an agent to the person. Each question belongs to one key. |
+| Inbox item | `inb_` | One thing that the person or a different agent sends to a key. See [Inbox](inbox.md). |
 
 An agent sees only the tasks and the questions of its own key. The account sees those of all its keys.
 
@@ -87,6 +89,7 @@ Each error has this body and a matching HTTP status.
 | `POST /v1/accounts` for each IP address | 20 in one hour |
 | `POST /v1/attest/challenge` for each IP address | 20 in one hour |
 | `notify_user` calls for each key | 30 in one hour |
+| Messages from one sender | 60 in one hour |
 
 The operator of a server can change the first three values.
 
@@ -108,6 +111,8 @@ The operator of a server can change the first three values.
 | One question option | 1 to 30 characters |
 | Typed answer | 1 to 1,000 characters |
 | Question `expires_in` | 60 to 86,400 seconds |
+| Message text | 1 to 2,000 characters |
+| Unread inbox items for each key | 200. The oldest item is removed first. |
 
 A request above a count limit gets `409`.
 
@@ -119,6 +124,7 @@ The server makes `title`, `label`, `status_note`, `prompt`, and each option one 
 |------|---------|
 | A task with the status `done` or `cancelled` | 90 days after its last update. The event stream sends `task.deleted`. |
 | A question that is not `pending` | 90 days after it closed |
+| An inbox item | 7 days if it is unread, 24 hours after it was read |
 | All other data | When the person deletes it |
 
 ## Health

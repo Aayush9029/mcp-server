@@ -6,7 +6,7 @@ from mcp_client_server.errors import LimitReached, NotFound
 from mcp_client_server.events import frames
 from mcp_client_server.ids import IdSource, KeyId
 from mcp_client_server.limits import LAST_USED_WRITE_INTERVAL_SECONDS, Limits
-from mcp_client_server.models import ClientInfo, Key, KeyCreate, KeyCreated, KeyPatch
+from mcp_client_server.models import Agent, ClientInfo, Key, KeyCreate, KeyCreated, KeyPatch
 from mcp_client_server.push import PushDispatcher
 from mcp_client_server.store import Store
 
@@ -26,6 +26,19 @@ class KeyService:
 
     async def all(self, principal: AccountPrincipal) -> list[Key]:
         return await self._store.list_keys(principal.account_id)
+
+    async def agents(self, principal: AgentPrincipal) -> list[Agent]:
+        """The keys of the account as an agent sees them: who it can send a message to."""
+        return [
+            Agent(
+                key_id=key.id,
+                label=key.label,
+                is_self=key.id == principal.key_id,
+                last_client=key.last_client,
+                last_used_at=key.last_used_at,
+            )
+            for key in await self._store.list_keys(principal.account_id)
+        ]
 
     async def create(self, principal: AccountPrincipal, data: KeyCreate) -> KeyCreated:
         secret = new_secret(API_KEY_PREFIX)

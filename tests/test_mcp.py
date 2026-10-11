@@ -20,6 +20,9 @@ TOOL_ORDER = [
     "notify_user",
     "ask_user",
     "get_answer",
+    "check_inbox",
+    "send_message",
+    "list_agents",
 ]
 BOTH_HANDSHAKES = pytest.mark.parametrize("mode", ["auto", "legacy"])
 
@@ -111,6 +114,9 @@ async def test_tools_list_has_the_order_schemas_and_annotations_of_the_contract(
         "notify_user": (False, False, False),
         "ask_user": (False, False, False),
         "get_answer": (True, False, True),
+        "check_inbox": (False, False, False),
+        "send_message": (False, False, False),
+        "list_agents": (True, False, True),
     }
     for tool in tools:
         assert tool.title
@@ -138,6 +144,12 @@ async def test_tools_list_has_the_order_schemas_and_annotations_of_the_contract(
         ["prompt"],
     )
     assert arguments("get_answer") == ({"question_id", "wait_seconds"}, ["question_id"])
+    assert arguments("check_inbox") == ({"wait_seconds", "limit", "mark_read"}, [])
+    assert arguments("send_message") == ({"to", "text", "task_id"}, ["to", "text"])
+    assert arguments("list_agents") == (set(), [])
+    inbox = by_name["check_inbox"].input_schema["properties"]
+    assert (inbox["wait_seconds"]["default"], inbox["limit"]["default"], inbox["mark_read"]["default"]) == (0, 20, True)
+    assert (inbox["limit"]["minimum"], inbox["limit"]["maximum"]) == (1, 50)
     wait = by_name["ask_user"].input_schema["properties"]["wait_seconds"]
     assert (wait["default"], wait["minimum"], wait["maximum"]) == (30, 0, 50)
     assert by_name["ask_user"].input_schema["properties"]["kind"]["default"] == "confirm"
@@ -165,6 +177,7 @@ async def test_tools_list_has_the_order_schemas_and_annotations_of_the_contract(
         "created_at",
         "updated_at",
         "completed_at",
+        "seen_at",
         "created_at_iso",
         "updated_at_iso",
         "completed_at_iso",
@@ -187,6 +200,9 @@ async def test_tools_list_has_the_order_schemas_and_annotations_of_the_contract(
         "expires_at",
     }
     assert result("ask_user") == result("get_answer") == question_fields
+    assert result("check_inbox") == {"items", "unread"}
+    assert result("send_message") == {"id", "kind", "from", "task_id", "question_id", "text", "created_at", "read_at"}
+    assert result("list_agents") == {"agents"}
 
 
 @BOTH_HANDSHAKES

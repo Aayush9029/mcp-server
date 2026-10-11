@@ -26,13 +26,14 @@ The server sends a comment line (`: ping`) after 20 seconds with no event, so th
 |-------|------|-----------|
 | `ready` | `{"account_id": "acc_..."}` | One time, when the stream opens |
 | `task.created` | `{"task": Task}` | A task is made |
-| `task.updated` | `{"task": Task}` | A field of a task changes |
+| `task.updated` | `{"task": Task}` | A field of a task changes, also `seen_at` |
 | `task.deleted` | `{"task_id": "tsk_...", "key_id": "key_..."}` | A task is deleted, or it expires |
 | `key.created` | `{"key": Key}` | A key is made |
 | `key.updated` | `{"key": Key}` | The label changes, or `last_client` changes |
 | `key.deleted` | `{"key_id": "key_..."}` | A key is deleted. No event comes for its tasks and its questions. |
 | `question.created` | `{"question": Question}` | An agent asks a question |
 | `question.updated` | `{"question": Question}` | The status of a question changes |
+| `inbox.updated` | `{"key_id": "key_...", "unread": 2}` | The server adds an item to the [inbox](inbox.md) of a key, or the agent reads items |
 | `account.deleted` | `{}` | The account is deleted |
 
 The objects are those of the [REST API](rest-api.md#objects).

@@ -11,10 +11,12 @@ from mcp_client_server.limits import Limits
 from mcp_client_server.push import PushDispatcher
 from mcp_client_server.services.accounts import AccountService, DeviceService
 from mcp_client_server.services.auth import AuthService
+from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.integrity import IntegrityService
 from mcp_client_server.services.keys import KeyService
 from mcp_client_server.services.maintenance import Maintenance
 from mcp_client_server.services.questions import QuestionService
+from mcp_client_server.services.seen import SeenMarker
 from mcp_client_server.services.system import SystemService
 from mcp_client_server.services.tasks import TaskService
 from mcp_client_server.store import Store
@@ -36,6 +38,7 @@ class Services:
     keys: KeyService
     tasks: TaskService
     questions: QuestionService
+    inbox: InboxService
     maintenance: Maintenance
 
 
@@ -49,7 +52,9 @@ def build_services(
     limits: Limits,
     attest_roots: Sequence[x509.Certificate],
 ) -> Services:
-    questions = QuestionService(store, events, push, clock, ids, limits)
+    seen = SeenMarker(store, clock)
+    inbox = InboxService(store, events, seen, clock, ids, limits)
+    questions = QuestionService(store, events, push, inbox, clock, ids, limits)
     return Services(
         settings=settings,
         limits=limits,
@@ -61,7 +66,8 @@ def build_services(
         accounts=AccountService(store, clock, ids),
         devices=DeviceService(store, clock, limits),
         keys=KeyService(store, push, clock, ids, limits),
-        tasks=TaskService(store, push, questions, clock, ids, limits),
+        tasks=TaskService(store, push, questions, inbox, seen, clock, ids, limits),
+        inbox=inbox,
         questions=questions,
         maintenance=Maintenance(store, questions, clock, limits),
     )

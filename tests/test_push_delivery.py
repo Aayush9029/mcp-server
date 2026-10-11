@@ -26,8 +26,6 @@ from tests.support import (
     make_device,
     make_task,
     payload_json,
-    settle,
-    until,
 )
 
 OTHER_TOKEN = "0f" * 32
@@ -305,9 +303,8 @@ async def test_drain_returns_when_a_job_ended_in_the_same_turn_of_the_loop(
 
 
 async def widget_pushes(running: Running) -> list[PushRequest]:
-    """The WidgetKit pushes since the last call."""
+    """The WidgetKit pushes since the last call, after the push jobs of the requests are done."""
     await running.pushes_done()
-    await settle()
     sent = running.push.of_type("widgets")
     running.push.sent.clear()
     return sent
@@ -334,17 +331,23 @@ async def test_a_change_reloads_the_widgets_at_most_one_time_in_15_seconds_and_t
     await api.ask(key)
     assert await widget_pushes(running) == []
 
+    # The interval ends, and one push goes for the three changes. The dispatcher sleeps for the interval, and
+    # the clock moves only after that sleep started.
+    await running.clock.sleeping(15)
     running.clock.advance(15)
-    await until(lambda: len(running.push.of_type("widgets")) == 1)
+    await running.push.sent_of("widgets", 1)
     assert len(await widget_pushes(running)) == 1
 
     # No change came in the second interval, so no push goes when it ends.
+    await running.clock.sleeping(15)
     running.clock.advance(15)
+    await running.clock.sleeping(15)
     assert await widget_pushes(running) == []
+
     await api.http.delete(f"/v1/tasks/{task['id']}", headers=key)
     assert await widget_pushes(running) == []
     running.clock.advance(15)
-    await until(lambda: len(running.push.of_type("widgets")) == 1)
+    await running.push.sent_of("widgets", 1)
 
 
 async def test_a_question_reloads_the_widgets_and_a_dead_widget_token_is_removed(

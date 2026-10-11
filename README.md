@@ -35,6 +35,7 @@ This MCP server connects Claude Code, Cursor, Codex, and other AI tools to your 
 - Get notifications on your iPhone when AI assistants finish tasks
 - Follow work in progress with a Live Activity on the Lock Screen
 - Answer your agent's questions from the notification
+- Assign a task or send a message from your phone, and your agent picks it up
 - Track progress across multiple AI tools and automation scripts
 
 Perfect for developers who want their AI assistants to collaborate on real projects with automatic task tracking and mobile notifications.
@@ -98,7 +99,7 @@ Once configured, your AI assistant can:
 ## Available Tools
 
 <details>
-<summary>Eight tools for your agents</summary>
+<summary>Eleven tools for your agents</summary>
 
 | Tool | What it does |
 |------|--------------|
@@ -110,6 +111,9 @@ Once configured, your AI assistant can:
 | `notify_user` | Send a push notification to your devices |
 | `ask_user` | Ask you a yes-or-no, multiple-choice, or free-text question |
 | `get_answer` | Wait for your answer to a question |
+| `check_inbox` | Read new tasks, changes, and messages that you send from the app |
+| `send_message` | Send a message to a different agent on your account |
+| `list_agents` | List the other agents on your account |
 
 </details>
 

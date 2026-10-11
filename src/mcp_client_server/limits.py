@@ -21,6 +21,11 @@ WAIT_MAX_SECONDS = 50
 MCP_WAIT_DEFAULT_SECONDS = 30
 QUESTION_LIST_MAX = 100
 
+MESSAGE_MAX = 2000
+INBOX_LIMIT_MAX = 50
+INBOX_LIMIT_DEFAULT = 20
+INBOX_VIEW_COUNT = 50
+
 LIST_LIMIT_MAX = 500
 LIST_LIMIT_DEFAULT = 100
 MCP_LIST_LIMIT_DEFAULT = 50
@@ -39,6 +44,10 @@ class Limits:
     notify_user_per_hour: int = 30
     closed_task_ttl_seconds: int = 90 * 24 * 3600
     max_pending_questions_per_key: int = 20
+    max_unread_inbox_items: int = 200
+    unread_inbox_ttl_seconds: int = 7 * 24 * 3600
+    read_inbox_ttl_seconds: int = 24 * 3600
+    messages_per_hour: int = 60
     closed_question_ttl_seconds: int = 90 * 24 * 3600
     # A filter on priority reads tasks that it does not return. One request reads this many at most.
     filter_scan_budget: int = 2000

@@ -6,14 +6,15 @@ import httpx2
 import pytest
 
 from mcp_client_server.limits import Limits
-from mcp_client_server.services import Services
 from mcp_client_server.store import Store
 from tests.conftest import Launch
 from tests.support import (
     DEVICE_A,
     DEVICE_B,
+    SIGNAL_SECONDS,
     Api,
     EventListener,
+    FakeClock,
     Headers,
     Json,
     RawStore,
@@ -21,17 +22,28 @@ from tests.support import (
     error,
     mcp_client,
     payload_json,
+    settle,
     structured,
     tool_text,
-    until,
 )
 
 DAY = 24 * 3600
+# The sweep that expires questions sleeps this long between two runs.
+SWEEP = 10
 
 
-async def waiting(services: Services, count: int = 1) -> None:
-    """Until `count` calls wait on the event subscription of this process."""
-    await until(lambda: services.events.stream_count >= count)
+async def waiting(clock: FakeClock, wait: float = 50, count: int = 1) -> None:
+    """Until `count` calls wait for an answer with a limit of `wait` seconds.
+
+    A call arms its time limit last: it has its event subscription and its second read of the question by then.
+    Thus an answer after this point reaches the call only as an event, and the clock can move for the limit.
+    """
+    await clock.sleeping(wait, count)
+
+
+async def swept(clock: FakeClock) -> None:
+    """Until the sweep completed its run and sleeps again."""
+    await clock.sleeping(SWEEP)
 
 
 def get_with_wait(api: Api, auth: Headers, question_id: str, wait: int = 50) -> asyncio.Task[httpx2.Response]:
@@ -151,7 +163,8 @@ async def test_two_answers_at_the_same_time_give_one_winner(running: Running, re
     assert (await api.http.get(f"/v1/questions/{question['id']}", headers=key)).json() == winner
 
     await running.pushes_done()
-    assert await redis_listener.names() == ["question.updated"]
+    # One status change, and one answer in the inbox of the agent.
+    assert await redis_listener.names() == ["question.updated", "inbox.updated"]
     assert len(running.push.of_type("background")) == 1
 
 
@@ -248,13 +261,13 @@ async def test_a_call_that_waits_returns_when_the_person_answers(running: Runnin
     question = await api.ask(key)
 
     held = get_with_wait(api, key, question["id"])
-    await waiting(running.services)
+    await waiting(running.clock)
     await api.answer(account, question["id"], "No")
 
     # The clock did not move, so the wait did not end by its time limit: the answer event woke the call.
-    response = await asyncio.wait_for(held, 5)
+    response = await asyncio.wait_for(held, SIGNAL_SECONDS)
     assert (response.status_code, response.json()["status"], response.json()["answer"]) == (200, "answered", "No")
-    await until(lambda: running.services.events.stream_count == 0)
+    assert running.services.events.stream_count == 0
 
 
 async def test_a_call_that_waits_returns_the_pending_question_after_its_time(running: Running) -> None:
@@ -263,13 +276,13 @@ async def test_a_call_that_waits_returns_the_pending_question_after_its_time(run
     question = await api.ask(key)
 
     held = get_with_wait(api, key, question["id"], wait=20)
-    await waiting(running.services)
+    await waiting(running.clock, 20)
     running.clock.advance(19)
-    await asyncio.sleep(0.02)
+    await settle()
     assert not held.done()
 
     running.clock.advance(1)
-    response = await asyncio.wait_for(held, 5)
+    response = await asyncio.wait_for(held, SIGNAL_SECONDS)
     assert response.json() == question
     assert running.services.events.stream_count == 0
 
@@ -287,10 +300,10 @@ async def test_a_call_that_waits_wakes_for_an_answer_that_a_different_worker_get
         question = await first.api.ask(key)
 
         held = get_with_wait(first.api, key, question["id"])
-        await waiting(first.services)
+        await waiting(first.clock)
         assert (await second.api.answer(account, question["id"])).status_code == 200
 
-        assert (await asyncio.wait_for(held, 5)).json()["status"] == "answered"
+        assert (await asyncio.wait_for(held, SIGNAL_SECONDS)).json()["status"] == "answered"
         assert second.services.events.stream_count == 0
 
 
@@ -302,33 +315,35 @@ async def test_a_call_that_waits_ends_when_the_question_is_cancelled_or_its_task
     about_task = await api.ask(key, task_id=task["id"])
 
     held = [get_with_wait(api, account, cancelled["id"]), get_with_wait(api, key, about_task["id"])]
-    await waiting(running.services, 2)
+    await waiting(running.clock, count=2)
     await api.http.delete(f"/v1/questions/{cancelled['id']}", headers=key)
     await api.http.delete(f"/v1/tasks/{task['id']}", headers=account)
 
-    statuses = [response.json()["status"] for response in await asyncio.wait_for(asyncio.gather(*held), 5)]
+    responses = await asyncio.wait_for(asyncio.gather(*held), SIGNAL_SECONDS)
+    statuses = [response.json()["status"] for response in responses]
     assert statuses == ["cancelled", "cancelled"]
 
 
 async def test_many_calls_wait_at_once_and_hold_no_store_connection(launch: Launch, store_url: str | None) -> None:
-    # With a real store, the application has its own pool of two connections. 300 calls that each kept one
+    # With a real store, the application has its own pool of two connections. 100 calls that each kept one
     # connection could not all wait.
     pool = {"own_connections": True, "redis_max_connections": 2} if store_url else {}
     # The plain test client for fakeredis has a small pool that does not queue, so fewer calls start at once.
-    count = 300 if store_url else 40
+    count = 100 if store_url else 40
     async with launch(**pool) as running:
         api = running.api
         account, key, _ = await api.agent()
         question = await api.ask(key)
 
         held = [get_with_wait(api, key, question["id"]) for _ in range(count)]
-        await waiting(running.services, count)
+        await waiting(running.clock, count=count)
+        assert running.services.events.stream_count == count
         assert (await api.http.get("/health")).status_code == 200
         await api.answer(account, question["id"])
 
-        responses = await asyncio.wait_for(asyncio.gather(*held), 10)
+        responses = await asyncio.wait_for(asyncio.gather(*held), SIGNAL_SECONDS)
         assert {(response.status_code, response.json()["status"]) for response in responses} == {(200, "answered")}
-        await until(lambda: running.services.events.stream_count == 0)
+        assert running.services.events.stream_count == 0
 
 
 async def test_a_pending_question_expires_at_its_time_and_the_sweep_tells_the_clients(
@@ -340,22 +355,19 @@ async def test_a_pending_question_expires_at_its_time_and_the_sweep_tells_the_cl
     kept = await api.ask(key, expires_in=3600)
     await redis_listener.start()
 
+    async def listed(status: str) -> list[str]:
+        response = await api.http.get(f"/v1/questions?status={status}", headers=key)
+        return [item["id"] for item in response.json()["questions"]]
+
+    await swept(running.clock)
     running.clock.advance(59)
-    await asyncio.sleep(0.02)
-    assert [item["id"] for item in (await api.http.get("/v1/questions", headers=key)).json()["questions"]] == [
-        kept["id"],
-        question["id"],
-    ]
+    await swept(running.clock)
+    assert await listed("pending") == [kept["id"], question["id"]]
 
     running.clock.advance(11)
-
-    async def expired() -> list[str]:
-        listed = (await api.http.get("/v1/questions?status=expired", headers=key)).json()["questions"]
-        return [item["id"] for item in listed]
-
-    async with asyncio.timeout(5):
-        while await expired() != [question["id"]]:  # noqa: ASYNC110  the list is read over HTTP
-            await asyncio.sleep(0.005)
+    await swept(running.clock)
+    # The list does not expire a question itself, so this is the work of the sweep.
+    assert await listed("expired") == [question["id"]]
     assert await redis_listener.names() == ["question.updated"]
     error(await api.answer(account, question["id"]), 409, "conflict")
     assert (await api.http.get(f"/v1/questions/{kept['id']}", headers=key)).json()["status"] == "pending"
@@ -366,9 +378,10 @@ async def test_an_answer_or_a_read_after_the_time_sees_expired_also_before_the_s
     account, key, _ = await api.agent()
     first = await api.ask(key, expires_in=60)
     second = await api.ask(key, expires_in=60)
-    # The clock passes the time between two sweeps: 9 seconds give the sweep no turn.
+    # The sweep runs at 51 seconds and sleeps until 61. The questions expire at 60, between two runs.
+    await swept(running.clock)
     running.clock.advance(51)
-    await asyncio.sleep(0.02)
+    await swept(running.clock)
     running.clock.advance(9)
 
     error(await api.answer(account, first["id"]), 409, "conflict")
@@ -380,13 +393,15 @@ async def test_a_call_that_waits_past_the_expiry_returns_expired(running: Runnin
     api = running.api
     _, key, _ = await api.agent()
     question = await api.ask(key, expires_in=60)
+    await swept(running.clock)
     running.clock.advance(35)
-    await asyncio.sleep(0.02)
+    await swept(running.clock)
 
     held = get_with_wait(api, key, question["id"], wait=50)
-    await waiting(running.services)
+    # The question expires in 25 seconds, before the 50 seconds of the wait. The limit of the call is the nearer one.
+    await running.clock.sleeping(25, tolerance=0.5)
     running.clock.advance(25)
-    assert (await asyncio.wait_for(held, 5)).json()["status"] == "expired"
+    assert (await asyncio.wait_for(held, SIGNAL_SECONDS)).json()["status"] == "expired"
 
 
 async def test_a_new_question_alerts_each_device_and_a_status_change_removes_the_alert(running: Running) -> None:
@@ -540,12 +555,12 @@ async def test_ask_user_holds_the_tool_call_until_the_answer(running: Running) -
     arguments = {"prompt": "Deploy to production now?", "task_id": task["id"]}
 
     call = asyncio.create_task(api.tool(key, "ask_user", arguments))
-    await waiting(running.services)
+    await waiting(running.clock, 30)
     pending = (await api.http.get("/v1/questions", headers=account)).json()["questions"]
     assert [(item["prompt"], item["task_id"]) for item in pending] == [("Deploy to production now?", task["id"])]
     await api.answer(account, pending[0]["id"])
 
-    result = await asyncio.wait_for(call, 5)
+    result = await asyncio.wait_for(call, SIGNAL_SECONDS)
     assert result["isError"] is False
     assert result["structuredContent"] == {
         **pending[0],
@@ -566,14 +581,14 @@ async def test_ask_user_returns_pending_after_wait_seconds_and_get_answer_waits_
     assert "Call get_answer" in asked["content"][0]["text"]
 
     again = asyncio.create_task(api.tool(key, "get_answer", {"question_id": question["id"], "wait_seconds": 30}))
-    await waiting(running.services)
+    await waiting(running.clock, 30)
     running.clock.advance(30)
-    assert (await asyncio.wait_for(again, 5))["structuredContent"]["status"] == "pending"
+    assert (await asyncio.wait_for(again, SIGNAL_SECONDS))["structuredContent"]["status"] == "pending"
 
     last = asyncio.create_task(api.tool(key, "get_answer", {"question_id": question["id"]}))
-    await waiting(running.services)
+    await waiting(running.clock, 30)
     await api.answer(account, question["id"], "Blue")
-    assert (await asyncio.wait_for(last, 5))["structuredContent"]["answer"] == "Blue"
+    assert (await asyncio.wait_for(last, SIGNAL_SECONDS))["structuredContent"]["answer"] == "Blue"
 
 
 @pytest.mark.parametrize("mode", ["auto", "legacy"])

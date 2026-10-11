@@ -1,6 +1,5 @@
 """Service rules that need a clock, a limit, or a store that misbehaves."""
 
-import asyncio
 from typing import Literal, override
 
 import pytest
@@ -14,7 +13,9 @@ from mcp_client_server.limits import Limits
 from mcp_client_server.models import Account, Key, KeyCreate, NotifyInput, Priority, Task, TaskCreate, TaskPatch
 from mcp_client_server.push import PushDispatcher
 from mcp_client_server.services import Services
+from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.questions import QuestionService
+from mcp_client_server.services.seen import SeenMarker
 from mcp_client_server.services.tasks import TaskService
 from mcp_client_server.store import Store, StoredTask
 from tests.conftest import Launch
@@ -135,26 +136,24 @@ async def test_a_task_that_was_opened_again_does_not_expire(running: Running) ->
     assert (await services.tasks.get(key, task.id)).status == "todo"
 
 
-async def test_the_maintenance_loop_expires_tasks_and_one_worker_has_the_lock(running: Running) -> None:
+async def test_the_maintenance_loop_expires_tasks_and_one_worker_has_the_lock(running: Running, store: Store) -> None:
     services, clock = running.services, running.clock
     _, key = await new_agent(services)
     task = await services.tasks.create(key, TaskCreate(title="Old", status="done"))
-    clock.advance(91 * DAY)
 
-    loop = asyncio.create_task(services.maintenance.run())
-    try:
-        async with asyncio.timeout(5):
-            while True:
-                try:
-                    await services.tasks.get(key, task.id)
-                except NotFound:
-                    break
-                await asyncio.sleep(0)
-    finally:
-        loop.cancel()
-        await asyncio.gather(loop, return_exceptions=True)
-    # Each pass waits from half an interval to one interval. The 10 second sleeps are the question sweep.
-    assert all(450 <= seconds <= 900 for seconds in clock.sleeps if seconds != 10)
+    async def loop_sleeps() -> None:
+        # Each pass waits from half an interval to one interval: 450 to 900 seconds.
+        await clock.sleeping(675, tolerance=225)
+
+    await loop_sleeps()
+    clock.advance(91 * DAY)
+    await loop_sleeps()
+
+    with pytest.raises(NotFound):
+        await services.tasks.get(key, task.id)
+    # The loop took the lock, so a second worker that wakes in the same half interval does no work.
+    assert not await store.acquire_lock("expire", 600)
+    assert all(450 <= seconds <= 900 for seconds in clock.sleeps if seconds > 60)
 
 
 class ConflictStore(Store):
@@ -172,7 +171,10 @@ async def test_a_write_that_always_loses_the_race_ends_as_a_conflict(redis: Redi
     push = PushDispatcher(store, None, None, clock)
     ids, limits = SequentialIds(), Limits()
     hub = EventHub(FakeBus(clock).connect, store.keys, clock)
-    tasks = TaskService(store, push, QuestionService(store, hub, push, clock, ids, limits), clock, ids, limits)
+    seen = SeenMarker(store, clock)
+    inbox = InboxService(store, hub, seen, clock, ids, limits)
+    questions = QuestionService(store, hub, push, inbox, clock, ids, limits)
+    tasks = TaskService(store, push, questions, inbox, seen, clock, ids, limits)
     real = Store(redis, "t")
     account_id, key_id = AccountId("acc_1"), KeyId("key_1")
     await real.create_account(Account(id=account_id, created_at=1.0), hash_secret(Secret("mca_x")))

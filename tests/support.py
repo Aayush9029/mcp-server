@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,7 +15,7 @@ from mcp_types import CallToolResult, Implementation, TextContent
 from redis.asyncio import Redis
 
 from mcp_client_server.errors import StoreUnavailable
-from mcp_client_server.ids import AccountId, DeviceId, KeyId, QuestionId, TaskId
+from mcp_client_server.ids import AccountId, DeviceId, InboxItemId, KeyId, QuestionId, TaskId
 from mcp_client_server.models import Device, Task
 from mcp_client_server.push import PushRequest, PushResult
 from mcp_client_server.services import Services
@@ -25,6 +25,10 @@ from mcp_client_server.store.client import KeyValue, integer, items, text, text_
 type Headers = dict[str, str]
 # Parsed JSON has no static shape. The tests read it by key, so `Any` stays inside the test code.
 type Json = dict[str, Any]
+
+# The time limit for a signal or a result that must come. It only ends a test that has a defect; it is long,
+# so that a slow or busy machine does not fail a correct test.
+SIGNAL_SECONDS = 30.0
 
 DEVICE_A = DeviceId("dev_11111111-1111-4111-8111-111111111111")
 DEVICE_B = DeviceId("dev_22222222-2222-4222-8222-222222222222")
@@ -40,18 +44,29 @@ MCP_META: Json = {
 }
 
 
+@dataclass(frozen=True)
+class _Sleep:
+    seconds: float
+    deadline: float
+    woken: asyncio.Future[None]
+
+
 class FakeClock:
     """A clock that the test moves.
 
     Each read of `now` moves the time by `tick`, so two writes never share a timestamp.
     A task that sleeps continues only after the test moves the clock past its wake-up time.
+
+    A wake-up time is counted from the moment the task starts to sleep. Thus a test must not move the clock
+    for a task before that task sleeps: `await clock.sleeping(seconds)` is the signal that it does.
     """
 
     def __init__(self, start: float = 1_760_000_000.0, tick: float = 0.001) -> None:
         self.time = start
         self.tick = tick
         self._monotonic = 0.0
-        self._sleepers: list[tuple[float, asyncio.Future[None]]] = []
+        self._sleepers: list[_Sleep] = []
+        self._arrivals: list[asyncio.Future[None]] = []
         self.sleeps: list[float] = []
 
     def now(self) -> float:
@@ -64,20 +79,55 @@ class FakeClock:
     def advance(self, seconds: float) -> None:
         self.time += seconds
         self._monotonic += seconds
-        due = [sleeper for deadline, sleeper in self._sleepers if deadline <= self._monotonic]
-        self._sleepers = [(deadline, sleeper) for deadline, sleeper in self._sleepers if sleeper not in due]
-        for sleeper in due:
-            if not sleeper.done():
-                sleeper.set_result(None)
+        due = [sleep for sleep in self._sleepers if sleep.deadline <= self._monotonic]
+        self._sleepers = [sleep for sleep in self._sleepers if sleep.deadline > self._monotonic]
+        for sleep in due:
+            if not sleep.woken.done():
+                sleep.woken.set_result(None)
 
     async def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
         if seconds <= 0:
             await asyncio.sleep(0)
             return
-        sleeper: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._sleepers.append((self._monotonic + seconds, sleeper))
-        await sleeper
+        sleep = _Sleep(seconds, self._monotonic + seconds, asyncio.get_running_loop().create_future())
+        self._sleepers.append(sleep)
+        _wake(self._arrivals)
+        await sleep.woken
+
+    def _armed(self, seconds: float, tolerance: float) -> int:
+        # A task that was cancelled in its sleep has a future that is done.
+        return sum(
+            1 for sleep in self._sleepers if not sleep.woken.done() and abs(sleep.seconds - seconds) <= tolerance
+        )
+
+    async def sleeping(self, seconds: float, count: int = 1, *, tolerance: float = 0.0) -> None:
+        """Wait until `count` tasks sleep for `seconds`. Each of them has then armed its wake-up time.
+
+        This is a signal from `sleep`, not a poll: no time passes, and the speed of the machine has no effect.
+        """
+        try:
+            async with asyncio.timeout(SIGNAL_SECONDS):
+                while self._armed(seconds, tolerance) < count:
+                    await _arrival(self._arrivals)
+        except TimeoutError:
+            now = sorted(sleep.seconds for sleep in self._sleepers if not sleep.woken.done())
+            message = f"{self._armed(seconds, tolerance)} of {count} tasks sleep for {seconds} s. All sleeps: {now}"
+            raise AssertionError(message) from None
+
+
+def _wake(waiters: list[asyncio.Future[None]]) -> None:
+    for waiter in waiters:
+        if not waiter.done():
+            waiter.set_result(None)
+    waiters.clear()
+
+
+async def _arrival(waiters: list[asyncio.Future[None]]) -> None:
+    """Wait for the next `_wake` of this list."""
+    waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    waiters.append(waiter)
+    await waiter
 
 
 class SequentialIds:
@@ -100,6 +150,9 @@ class SequentialIds:
     def question_id(self) -> QuestionId:
         return QuestionId(self._next("qst"))
 
+    def inbox_id(self) -> InboxItemId:
+        return InboxItemId(self._next("inb"))
+
 
 class RecordingPushSender:
     """An APNs stand-in. It records each request and answers as the test tells it."""
@@ -108,9 +161,11 @@ class RecordingPushSender:
         self.sent: list[PushRequest] = []
         self.replies: dict[str, PushResult | Exception] = {}
         self.closed = False
+        self._arrivals: list[asyncio.Future[None]] = []
 
     async def send(self, request: PushRequest) -> PushResult:
         self.sent.append(request)
+        _wake(self._arrivals)
         reply = self.replies.get(request.token, PushResult(200))
         if isinstance(reply, Exception):
             raise reply
@@ -124,6 +179,12 @@ class RecordingPushSender:
 
     def payloads(self, push_type: str) -> list[Json]:
         return [payload_json(request) for request in self.of_type(push_type)]
+
+    async def sent_of(self, push_type: str, count: int) -> None:
+        """Wait until `count` pushes of the type are recorded. A signal from `send`, not a poll."""
+        async with asyncio.timeout(SIGNAL_SECONDS):
+            while len(self.of_type(push_type)) < count:
+                await _arrival(self._arrivals)
 
 
 def payload_json(request: PushRequest) -> Json:
@@ -263,13 +324,6 @@ class EventListener:
         return names
 
 
-async def until(condition: Callable[[], bool], seconds: float = 5.0) -> None:
-    """Wait for something that needs real input and output, for example a socket of the test store."""
-    async with asyncio.timeout(seconds):
-        while not condition():  # noqa: ASYNC110  the condition has no event
-            await asyncio.sleep(0.002)
-
-
 async def settle(turns: int = 20) -> None:
     """Let the tasks that are ready run. No time passes."""
     for _ in range(turns):
@@ -386,6 +440,19 @@ class Api:
 
     async def answer(self, account: Headers, question_id: str, answer: str = "Yes") -> httpx2.Response:
         return await self.http.post(f"/v1/questions/{question_id}/answer", json={"answer": answer}, headers=account)
+
+    async def inbox(self, key: Headers, **query: object) -> Json:
+        """Read the inbox of a key: `GET /v1/inbox`."""
+        response = await self.http.get(
+            "/v1/inbox", params={name: str(value) for name, value in query.items()}, headers=key
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    async def message(self, auth: Headers, **body: object) -> Json:
+        response = await self.http.post("/v1/messages", json=body, headers=auth)
+        assert response.status_code == 201, response.text
+        return response.json()
 
     async def tool(self, key: Headers, name: str, arguments: Mapping[str, object]) -> Json:
         """Call an MCP tool over raw HTTP and return the `result` object."""

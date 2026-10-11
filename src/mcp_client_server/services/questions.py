@@ -19,6 +19,7 @@ from mcp_client_server.models import (
     QuestionStatus,
 )
 from mcp_client_server.push import PushDispatcher, QuestionChange
+from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.scope import own_scope
 from mcp_client_server.store import Store, StoredQuestion
 
@@ -46,11 +47,19 @@ class QuestionPage:
 
 class QuestionService:
     def __init__(
-        self, store: Store, events: EventHub, push: PushDispatcher, clock: Clock, ids: IdSource, limits: Limits
+        self,
+        store: Store,
+        events: EventHub,
+        push: PushDispatcher,
+        inbox: InboxService,
+        clock: Clock,
+        ids: IdSource,
+        limits: Limits,
     ) -> None:
         self._store = store
         self._events = events
         self._push = push
+        self._inbox = inbox
         self._clock = clock
         self._ids = ids
         self._limits = limits
@@ -129,6 +138,7 @@ class QuestionService:
                 raise ValidationFailed({"answer": f"Use one of the options: {', '.join(question.options)}."})
             answered = await self._close(principal.account_id, stored, "answered", data.answer)
             if answered:
+                await self._inbox.answered(principal.account_id, answered)
                 return answered
         raise Conflict("The question changed at the same time. Try again.")
 

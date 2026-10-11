@@ -20,6 +20,10 @@
 {p}:tq:{task}                zset    pending question id of the task by created_at
 {p}:qexp                     zset    pending question id by expires_at
 {p}:qclosed                  zset    closed question id by the time it closed, for expiry
+{p}:inb:{item}               string  inbox item JSON, with no read time
+{p}:key:{key}:inbox          zset    inbox item id by created_at
+{p}:key:{key}:inbox:unread   zset    unread item id by created_at
+{p}:key:{key}:inbox:read     zset    read item id by the time it was read
 {p}:wdg:{account}:{device}   string  WidgetKit push throttle
 {p}:wdgd:{account}:{device}  string  a change came while the throttle was on
 {p}:attc:{challenge}         string  App Attest challenge that is not used yet

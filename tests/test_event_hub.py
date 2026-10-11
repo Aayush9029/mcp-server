@@ -10,12 +10,14 @@ from mcp_client_server.errors import StoreUnavailable
 from mcp_client_server.events import EventHub, HubTiming, Subscription, frames
 from mcp_client_server.ids import AccountId, KeyId
 from mcp_client_server.store import KeySpace
-from tests.support import FakeBus, FakeClock, settle
+from tests.support import SIGNAL_SECONDS, FakeBus, FakeClock, settle
 
 MINE = AccountId("acc_mine")
 THEIRS = AccountId("acc_theirs")
 KEYS = KeySpace("t")
 LIVENESS = 20.0
+# Each `open` sleeps for this limit on the clock while it waits for the confirmation of the store.
+CONFIRM_LIMIT = 5.0
 
 type StartHub = Callable[..., EventHub]
 
@@ -54,7 +56,7 @@ async def take(subscription: Subscription, count: int) -> list[str]:
     """The next `count` frames of a stream."""
     received: list[str] = []
     stream = subscription.stream()
-    async with asyncio.timeout(2):
+    async with asyncio.timeout(SIGNAL_SECONDS):
         async for frame in stream:
             received.append(frame)
             if len(received) == count:
@@ -64,7 +66,7 @@ async def take(subscription: Subscription, count: int) -> list[str]:
 
 async def rest(subscription: Subscription) -> list[str]:
     """All frames until the server closes the stream."""
-    async with asyncio.timeout(2):
+    async with asyncio.timeout(SIGNAL_SECONDS):
         return [frame async for frame in subscription.stream()]
 
 
@@ -90,13 +92,18 @@ async def test_each_stream_of_an_account_gets_each_event(hub: EventHub, bus: Fak
 
 
 async def test_the_stream_is_ready_only_after_the_store_confirms_the_subscription(
-    start_hub: StartHub, bus: FakeBus
+    start_hub: StartHub, bus: FakeBus, clock: FakeClock
 ) -> None:
-    hub = start_hub(confirm_seconds=0.01)
+    hub = start_hub()
     await hub.start()
     bus.confirms = False
+    opening = asyncio.create_task(hub.open(MINE))
+    # The hub waits 5 seconds of its clock for the confirmation. No real time is in this limit.
+    await clock.sleeping(5.0)
+    assert not opening.done()
+    clock.advance(5.0)
     with pytest.raises(StoreUnavailable):
-        await hub.open(MINE)
+        await opening
     assert hub.stream_count == 0
 
     bus.confirms = True
@@ -162,12 +169,12 @@ async def test_a_lost_connection_closes_every_stream_and_the_hub_connects_again(
     bus.break_connection()
     assert await rest(mine) == [frames.ready(MINE)]
     assert await rest(theirs) == [frames.ready(THEIRS)]
-    await settle()
+    # The hub sleeps before its next try. The clock moves only after that sleep started.
+    await clock.sleeping(1.0)
     assert lost.closed
-    assert clock.sleeps == [1.0]
+    assert [seconds for seconds in clock.sleeps if seconds != CONFIRM_LIMIT] == [1.0]
 
     clock.advance(1.0)
-    await settle()
     again = await hub.open(MINE)
     assert bus.current is not lost
     bus.publish(KEYS.channel(MINE), event(1))
@@ -185,16 +192,16 @@ async def test_while_the_store_is_down_a_stream_cannot_open_and_the_log_has_one_
     bus.down = True
     bus.break_connection()
     for _ in range(5):
-        await settle()
+        await clock.sleeping(1.0)
         with pytest.raises(StoreUnavailable):
             await hub.open(MINE)
         clock.advance(1.0)
+    await clock.sleeping(1.0)
     assert hub.stream_count == 0
     assert len(caplog.records) == 1
 
     bus.down = False
     clock.advance(1.0)
-    await settle()
     assert await take(await hub.open(MINE), 1) == [frames.ready(MINE)]
 
 
