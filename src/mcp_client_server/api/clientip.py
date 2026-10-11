@@ -1,7 +1,7 @@
 from starlette.requests import HTTPConnection
 
 
-def client_ip(conn: HTTPConnection, behind_render: bool) -> str:
+def client_ip(conn: HTTPConnection, *, behind_render: bool) -> str:
     """The address for per-IP rate limits.
 
     On Render, the edge writes CF-Connecting-IP and replaces any value that the caller

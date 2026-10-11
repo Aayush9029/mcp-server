@@ -7,30 +7,35 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi>=0.115",
-    "httpx[http2]>=0.28.1",
-    "mcp>=2.3.0,<3",
-    "pydantic>=2",
-    "pydantic-settings>=2.15.0",
+    "cbor2>=6.1",
+    "cryptography>=50",
+    "fastapi>=0.143",
+    "httptools>=0.9",
+    "httpx2[http2]>=2.13.1",
+    "mcp>=2.3,<3",
+    "pydantic>=2.14",
+    "pydantic-settings>=2.15",
     "pyjwt[crypto]>=2.15.1",
-    "redis[hiredis]>=5",
-    "uvicorn[standard]>=0.54.0",
+    "redis[hiredis]>=8.1",
+    "uvicorn>=0.54",
+    "uvloop>=0.23; sys_platform != 'win32'",
 ]
 
 [project.scripts]
 mcp-client-server = "mcp_client_server.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.12.18,<0.13.0"]
+requires = ["uv_build>=0.13.0,<0.14.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "fakeredis[lua]>=2.39.0",
+    "anyio>=4.15",
+    "fakeredis[lua]>=2.39",
+    "hypothesis>=6.168",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
-    "pyyaml>=6.0.3",
-    "ruff>=0.17.0",
+    "ruff>=0.17",
 ]
 
 [tool.ruff]
@@ -38,21 +43,44 @@ line-length = 120
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC", "RUF", "PT", "C4", "PIE", "RET", "TID"]
-ignore = ["PT018"]
+select = [
+    "A", "ANN", "ARG", "ASYNC", "B", "BLE", "C4", "C90", "DTZ", "E", "ERA", "F", "FAST", "FBT", "FLY", "FURB",
+    "G", "I", "ICN", "INP", "ISC", "LOG", "N", "PERF", "PGH", "PIE", "PL", "PT", "PTH", "Q", "RET", "RSE", "RUF",
+    "S", "SIM", "SLF", "SLOT", "T10", "T20", "TID", "TRY", "UP", "W",
+]
+ignore = [
+    "N818",    # The error classes use HTTP status names (NotFound, Conflict).
+    "TRY003",  # A message that goes to the client is written where the error is raised.
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 8
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ASYNC109", "ASYNC110"]
+"tests/*" = [
+    "S101",     # pytest uses assert.
+    "PLR2004",  # A test compares with literal values.
+    "PLR0913",  # A test takes its fixtures as arguments.
+    "PLR0915",  # A flow test has many steps.
+    "ARG",      # A fake keeps the signature of the real object, and a fixture can be requested for its effect.
+    "FBT001",   # pytest gives each parameter by name.
+]
+"scripts/*" = ["INP001", "T201", "S101"]
 
 [tool.pyright]
 include = ["src", "tests", "scripts"]
 pythonVersion = "3.13"
-typeCheckingMode = "standard"
-strict = ["src"]
-reportMissingTypeStubs = false
+typeCheckingMode = "strict"
+reportUnnecessaryTypeIgnoreComment = true
+reportImplicitOverride = true
+reportPropertyTypeMismatch = true
+enableTypeIgnoreComments = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 anyio_mode = "auto"
-filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+filterwarnings = ["error"]

@@ -1,39 +1,80 @@
 import asyncio
 import logging
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal, Protocol
 
-from mcp_client_server.ids import now
-from mcp_client_server.models import CLOSED_STATUSES, Device, Task
+from mcp_client_server.clock import Clock
+from mcp_client_server.ids import AccountId, DeviceId, KeyId, TaskId
+from mcp_client_server.limits import WIDGET_PUSH_INTERVAL_SECONDS
+from mcp_client_server.models import CLOSED_STATUSES, Device, PatchField, Question, Task
 from mcp_client_server.push import payloads
 from mcp_client_server.push.apns import PushSender
-from mcp_client_server.push.payloads import PushRequest, TaskEvent, TokenRef
-from mcp_client_server.store import EndedActivity, PushContext, Store
+from mcp_client_server.push.payloads import ActivityPayload, PushRequest, TaskEvent, TokenKind, TokenRef
+from mcp_client_server.store import EndedActivity, PushContext, StoredTask
 
 logger = logging.getLogger(__name__)
 
 ChangeKind = Literal["created", "updated", "deleted"]
 
-_LIVE_FIELDS = frozenset({"title", "status", "progress", "status_note"})
+_LIVE_FIELDS: frozenset[PatchField] = frozenset({"title", "status", "progress", "status_note"})
 # A change of only these fields is a progress tick. It updates the devices but does not alert the person.
-_QUIET_FIELDS = frozenset({"progress", "status_note"})
+_QUIET_FIELDS: frozenset[PatchField] = frozenset({"progress", "status_note"})
 _STATUS_SUBTITLES = {"in_progress": "Task started", "done": "Task done", "cancelled": "Task cancelled"}
 _EVENTS: dict[ChangeKind, TaskEvent] = {
     "created": "task.created",
     "updated": "task.updated",
     "deleted": "task.deleted",
 }
+# Jobs that wait for the store or for APNs. A job above this number is dropped, so a slow APNs cannot fill the memory.
+_MAX_PENDING_JOBS = 2000
+_CLOSE_SECONDS = 10.0
+
+
+class PushStore(Protocol):
+    """The part of the store that the dispatcher needs."""
+
+    async def push_context(self, account_id: AccountId, key_id: KeyId, task_id: TaskId | None) -> PushContext: ...
+
+    async def clear_activities(self, task_id: TaskId) -> None: ...
+
+    async def forget_activity(self, task_id: TaskId, device_id: DeviceId, token: str | None = None) -> None: ...
+
+    async def clear_device_token(
+        self,
+        account_id: AccountId,
+        device_id: DeviceId,
+        field: Literal["apns_token", "push_to_start_token", "widget_push_token"],
+        token: str,
+    ) -> None: ...
+
+    async def get_task_unscoped(self, task_id: TaskId) -> StoredTask | None: ...
+
+    async def list_devices(self, account_id: AccountId) -> list[Device]: ...
+
+    async def widget_slot(self, account_id: AccountId, device_id: DeviceId) -> bool: ...
+
+    async def renew_widget_slot(self, account_id: AccountId, device_id: DeviceId) -> None: ...
+
+    async def take_widget_mark(self, account_id: AccountId, device_id: DeviceId) -> bool: ...
+
+    async def widget_throttled(self, account_id: AccountId, device_id: DeviceId) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
 class TaskChange:
     kind: ChangeKind
     task: Task
-    changed: frozenset[str]
+    changed: frozenset[PatchField]
     by_agent: bool
     # For a delete, the Live Activity tokens that the task had. The store has removed them by then.
-    activities: dict[str, str] | None = None
+    activities: Mapping[DeviceId, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class QuestionChange:
+    kind: Literal["created", "updated"]
+    question: Question
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +88,9 @@ class Topics:
     @property
     def live_activity(self) -> str:
         return self.app + payloads.LIVE_ACTIVITY_TOPIC_SUFFIX
+
+    def widgets(self, device: Device) -> str:
+        return self.for_device(device) + payloads.WIDGET_TOPIC_SUFFIX
 
 
 def subtitle(change: TaskChange) -> str:
@@ -101,49 +145,57 @@ def plan_task_pushes(change: TaskChange, ctx: PushContext, topics: Topics, at: f
     return requests
 
 
+def _activity_request(
+    device: Device,
+    token: str,
+    kind: TokenKind,
+    task: Task,
+    payload: ActivityPayload,
+    topics: Topics,
+    priority: Literal[5, 10],
+) -> PushRequest:
+    return PushRequest(
+        token=token,
+        environment=device.apns_environment,
+        topic=topics.live_activity,
+        push_type="liveactivity",
+        priority=priority,
+        payload=payload,
+        ttl_seconds=payloads.TRANSIENT_TTL_SECONDS,
+        ref=TokenRef(kind, device.id, task.id),
+    )
+
+
 def _plan_activity_pushes(change: TaskChange, ctx: PushContext, topics: Topics, at: float) -> list[PushRequest]:
     task = change.task
     devices = {device.id: device for device in ctx.devices}
     registered = ctx.activities if change.activities is None else change.activities
-    live = {device_id: token for device_id, token in registered.items() if device_id in devices}
-
-    def request(
-        device: Device, token: str, kind: payloads.TokenKind, payload: dict[str, Any], priority: int
-    ) -> PushRequest:
-        return PushRequest(
-            token=token,
-            environment=device.apns_environment,
-            topic=topics.live_activity,
-            push_type="liveactivity",
-            priority=priority,
-            payload=payload,
-            ttl_seconds=payloads.TRANSIENT_TTL_SECONDS,
-            ref=TokenRef(kind, device.id, task.id),
-        )
+    live = [(devices[device_id], token) for device_id, token in registered.items() if device_id in devices]
 
     if ends_activity(change):
         end = payloads.activity_end(task, at)
-        return [request(devices[device_id], token, "activity", end, 10) for device_id, token in live.items()]
+        return [_activity_request(device, token, "activity", task, end, topics, 10) for device, token in live]
 
     requests: list[PushRequest] = []
     if change.kind == "updated" and change.changed & _LIVE_FIELDS:
-        update = payloads.activity_update(task, at)
-        priority = 5 if change.changed <= _QUIET_FIELDS else 10
+        update = payloads.activity_update(task, at, ctx.question)
+        priority: Literal[5, 10] = 5 if change.changed <= _QUIET_FIELDS else 10
         requests += [
-            request(devices[device_id], token, "activity", update, priority) for device_id, token in live.items()
+            _activity_request(device, token, "activity", task, update, topics, priority) for device, token in live
         ]
     if starts_activity(change):
-        start = payloads.activity_start(task, ctx.key_label, at)
+        start = payloads.activity_start(task, ctx.key_label, at, ctx.question)
+        running = {device.id for device, _ in live}
         requests += [
-            request(device, device.push_to_start_token, "push_to_start_token", start, 10)
+            _activity_request(device, device.push_to_start_token, "push_to_start_token", task, start, topics, 10)
             for device in ctx.devices
-            if device.push_to_start_token and device.id not in live
+            if device.push_to_start_token and device.id not in running
         ]
     return requests
 
 
 def plan_message(
-    key_id: str, title: str, body: str, task: Task | None, ctx: PushContext, topics: Topics
+    key_id: KeyId, title: str, body: str, task: Task | None, ctx: PushContext, topics: Topics
 ) -> list[PushRequest]:
     payload = payloads.message(key_id, ctx.key_label, title, body, task)
     return [
@@ -162,20 +214,60 @@ def plan_message(
     ]
 
 
+def plan_question_pushes(
+    change: QuestionChange, ctx: PushContext, task: Task | None, topics: Topics, at: float
+) -> list[PushRequest]:
+    """A new question alerts each device. A status change removes the alert. The Live Activity of the task follows."""
+    question = change.question
+    asked = payloads.question_asked(question, ctx.key_label) if change.kind == "created" else None
+    requests = [
+        PushRequest(
+            token=device.apns_token,
+            environment=device.apns_environment,
+            topic=topics.for_device(device),
+            push_type="alert" if asked else "background",
+            priority=10 if asked else 5,
+            payload=asked or payloads.question_changed(question),
+            # A question that is expired cannot be answered, so its alert must not arrive after that time.
+            ttl_seconds=max(1, int(question.expires_at - at)) if asked else payloads.TRANSIENT_TTL_SECONDS,
+            ref=TokenRef("apns_token", device.id),
+            collapse_id=question.id,
+        )
+        for device in ctx.devices
+        if device.apns_token
+    ]
+    if task and ctx.live_activities:
+        devices = {device.id: device for device in ctx.devices}
+        update = payloads.activity_update(task, at, ctx.question)
+        requests += [
+            _activity_request(devices[device_id], token, "activity", task, update, topics, 10)
+            for device_id, token in ctx.activities.items()
+            if device_id in devices
+        ]
+    return requests
+
+
+def widget_request(device: Device, token: str, topics: Topics) -> PushRequest:
+    return PushRequest(
+        token=token,
+        environment=device.apns_environment,
+        topic=topics.widgets(device),
+        push_type="widgets",
+        # Apple's page for this push type gives no priority, so the header is left out.
+        priority=None,
+        payload=payloads.widget_reload(),
+        ttl_seconds=payloads.TRANSIENT_TTL_SECONDS,
+        ref=TokenRef("widget_push_token", device.id),
+    )
+
+
 def plan_activity_ends(ended: list[EndedActivity], ctx: PushContext, topics: Topics, at: float) -> list[PushRequest]:
     if not ctx.live_activities:
         return []
     devices = {device.id: device for device in ctx.devices}
     return [
-        PushRequest(
-            token=token,
-            environment=devices[device_id].apns_environment,
-            topic=topics.live_activity,
-            push_type="liveactivity",
-            priority=10,
-            payload=payloads.activity_end(item.task, at),
-            ttl_seconds=payloads.TRANSIENT_TTL_SECONDS,
-            ref=TokenRef("activity", device_id, item.task.id),
+        _activity_request(
+            devices[device_id], token, "activity", item.task, payloads.activity_end(item.task, at), topics, 10
         )
         for item in ended
         for device_id, token in item.tokens.items()
@@ -184,27 +276,44 @@ def plan_activity_ends(ended: list[EndedActivity], ctx: PushContext, topics: Top
 
 
 class PushDispatcher:
-    """Sends pushes in background tasks, so that a request does not wait on APNs."""
+    """Sends pushes in background jobs, so that a request does not wait on APNs."""
 
-    def __init__(self, store: Store, sender: PushSender | None, topics: Topics | None) -> None:
+    def __init__(
+        self,
+        store: PushStore,
+        sender: PushSender | None,
+        topics: Topics | None,
+        clock: Clock,
+        *,
+        max_pending_jobs: int = _MAX_PENDING_JOBS,
+    ) -> None:
         self._store = store
         self._sender = sender if topics else None
         self._topics = topics or Topics("", "")
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._clock = clock
+        self._max_pending_jobs = max_pending_jobs
+        self._jobs: set[asyncio.Task[None]] = set()
+        # One for each device with a WidgetKit throttle that this process started. It sends the push that waited.
+        self._widget_windows: dict[tuple[AccountId, DeviceId], asyncio.Task[None]] = {}
+        self._dropped = 0
 
     @property
     def enabled(self) -> bool:
         return self._sender is not None
 
-    def task_changed(self, account_id: str, change: TaskChange) -> None:
+    def task_changed(self, account_id: AccountId, change: TaskChange) -> None:
         if self._sender:
             self._spawn(self._task_changed(account_id, change))
 
-    def activities_ended(self, account_id: str, key_id: str, ended: list[EndedActivity]) -> None:
+    def question_changed(self, account_id: AccountId, change: QuestionChange) -> None:
+        if self._sender:
+            self._spawn(self._question_changed(account_id, change))
+
+    def activities_ended(self, account_id: AccountId, key_id: KeyId, ended: list[EndedActivity]) -> None:
         if self._sender and ended:
             self._spawn(self._activities_ended(account_id, key_id, ended))
 
-    async def message(self, account_id: str, key_id: str, title: str, body: str, task: Task | None) -> int:
+    async def message(self, account_id: AccountId, key_id: KeyId, title: str, body: str, task: Task | None) -> int:
         """Queue a notify_user push. Returns the number of devices that get it."""
         if not self._sender:
             return 0
@@ -215,18 +324,33 @@ class PushDispatcher:
         return len(requests)
 
     async def drain(self) -> None:
-        while self._tasks:
-            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+        while self._jobs:
+            await asyncio.gather(*tuple(self._jobs), return_exceptions=True)
+            # gather does not give control to the loop if each job is done already. A job leaves `_jobs` in a
+            # callback, and without this line that callback never runs and this loop never ends.
+            await asyncio.sleep(0)
 
     async def aclose(self) -> None:
-        await self.drain()
+        try:
+            async with asyncio.timeout(_CLOSE_SECONDS):
+                await self.drain()
+        except TimeoutError:
+            logger.warning("shutdown: %d push jobs did not finish and are cancelled", len(self._jobs))
+            for job in tuple(self._jobs):
+                job.cancel()
+            await asyncio.gather(*tuple(self._jobs), return_exceptions=True)
+        windows = tuple(self._widget_windows.values())
+        for window in windows:
+            window.cancel()
+        await asyncio.gather(*windows, return_exceptions=True)
         if self._sender:
             await self._sender.aclose()
 
-    async def _task_changed(self, account_id: str, change: TaskChange) -> None:
+    async def _task_changed(self, account_id: AccountId, change: TaskChange) -> None:
         task = change.task
         ctx = await self._store.push_context(account_id, task.key_id, task.id)
-        await self._deliver(account_id, plan_task_pushes(change, ctx, self._topics, now()))
+        await self._deliver(account_id, plan_task_pushes(change, ctx, self._topics, self._clock.now()))
+        await self._reload_widgets(account_id, ctx.devices)
         if change.kind == "deleted" or not ctx.activities:
             return
         if ends_activity(change):
@@ -236,11 +360,57 @@ class PushDispatcher:
         for device_id in ctx.activities.keys() - known:
             await self._store.forget_activity(task.id, device_id)
 
-    async def _activities_ended(self, account_id: str, key_id: str, ended: list[EndedActivity]) -> None:
-        ctx = await self._store.push_context(account_id, key_id, None)
-        await self._deliver(account_id, plan_activity_ends(ended, ctx, self._topics, now()))
+    async def _question_changed(self, account_id: AccountId, change: QuestionChange) -> None:
+        question = change.question
+        ctx = await self._store.push_context(account_id, question.key_id, question.task_id)
+        stored = await self._store.get_task_unscoped(question.task_id) if question.task_id and ctx.activities else None
+        task = stored.task if stored else None
+        requests = plan_question_pushes(change, ctx, task, self._topics, self._clock.now())
+        await self._deliver(account_id, requests)
+        await self._reload_widgets(account_id, ctx.devices)
 
-    async def _deliver(self, account_id: str, requests: list[PushRequest]) -> None:
+    async def _reload_widgets(self, account_id: AccountId, devices: list[Device]) -> None:
+        requests: list[PushRequest] = []
+        for device in devices:
+            if device.widget_push_token and await self._store.widget_slot(account_id, device.id):
+                requests.append(widget_request(device, device.widget_push_token, self._topics))
+                self._open_widget_window(account_id, device.id)
+        await self._deliver(account_id, requests)
+
+    def _open_widget_window(self, account_id: AccountId, device_id: DeviceId) -> None:
+        key = (account_id, device_id)
+        if key in self._widget_windows:
+            return
+        window = asyncio.create_task(self._widget_window(account_id, device_id))
+        self._widget_windows[key] = window
+        window.add_done_callback(lambda _: self._widget_windows.pop(key, None))
+
+    async def _widget_window(self, account_id: AccountId, device_id: DeviceId) -> None:
+        """After each throttle interval, send the one push that stands for the changes that came in the interval.
+
+        The window stays while the throttle is on in the store, also if a different worker turned it on again.
+        """
+        while True:
+            await self._clock.sleep(WIDGET_PUSH_INTERVAL_SECONDS)
+            try:
+                if not await self._store.take_widget_mark(account_id, device_id):
+                    if await self._store.widget_throttled(account_id, device_id):
+                        continue
+                    return
+                device = next((d for d in await self._store.list_devices(account_id) if d.id == device_id), None)
+                if device is None or not device.widget_push_token:
+                    return
+                await self._store.renew_widget_slot(account_id, device_id)
+                await self._deliver(account_id, [widget_request(device, device.widget_push_token, self._topics)])
+            except Exception:
+                logger.exception("widget push for device %s failed", device_id)
+                return
+
+    async def _activities_ended(self, account_id: AccountId, key_id: KeyId, ended: list[EndedActivity]) -> None:
+        ctx = await self._store.push_context(account_id, key_id, None)
+        await self._deliver(account_id, plan_activity_ends(ended, ctx, self._topics, self._clock.now()))
+
+    async def _deliver(self, account_id: AccountId, requests: list[PushRequest]) -> None:
         sender = self._sender
         if not sender or not requests:
             return
@@ -259,7 +429,7 @@ class PushDispatcher:
                     result.reason,
                 )
 
-    async def _forget(self, account_id: str, request: PushRequest) -> None:
+    async def _forget(self, account_id: AccountId, request: PushRequest) -> None:
         ref = request.ref
         logger.info("removing dead %s of device %s", ref.kind, ref.device_id)
         if ref.kind == "activity":
@@ -268,12 +438,19 @@ class PushDispatcher:
         else:
             await self._store.clear_device_token(account_id, ref.device_id, ref.kind, request.token)
 
-    def _spawn(self, coro: Coroutine[Any, Any, None]) -> None:
-        task = asyncio.create_task(coro)
-        self._tasks.add(task)
+    def _spawn(self, job: Coroutine[object, None, None]) -> None:
+        if len(self._jobs) >= self._max_pending_jobs:
+            job.close()
+            self._dropped += 1
+            # One line for the first drop and then for each thousand, so a flood does not fill the log.
+            if self._dropped % 1000 == 1:
+                logger.warning("push is behind: %d jobs wait, %d dropped so far", len(self._jobs), self._dropped)
+            return
+        task = asyncio.create_task(job)
+        self._jobs.add(task)
         task.add_done_callback(self._finished)
 
     def _finished(self, task: asyncio.Task[None]) -> None:
-        self._tasks.discard(task)
+        self._jobs.discard(task)
         if not task.cancelled() and task.exception():
-            logger.error("push task failed", exc_info=task.exception())
+            logger.error("push job failed", exc_info=task.exception())

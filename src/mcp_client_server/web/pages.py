@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 from mcp_client_server.config import Settings
-from mcp_client_server.limits import CLOSED_TASK_TTL_SECONDS
+from mcp_client_server.limits import Limits
 from mcp_client_server.web.layout import code, page
 
 _UPDATED = "October 10, 2026"
@@ -66,9 +66,9 @@ so use a header if you can.</p>
     return page(s.app_name, s.app_name, f"{s.app_name}: follow the work of your AI agents on Apple devices.", body)
 
 
-def _privacy(s: Settings) -> str:
+def _privacy(s: Settings, limits: Limits) -> str:
     name, email = escape(s.app_name), escape(s.support_email)
-    days = CLOSED_TASK_TTL_SECONDS // 86400
+    days = limits.closed_task_ttl_seconds // 86400
     body = f"""<h1>Privacy</h1>
 <p class="dim">Last updated: {_UPDATED}</p>
 <p class="lead">{name} has no user accounts with names, no email addresses, and no passwords.
@@ -194,11 +194,11 @@ immediately. See <a href="/privacy">Privacy</a>.</p>"""
     return page(s.app_name, f"Support - {s.app_name}", f"Help for {s.app_name}.", body)
 
 
-def pages_router(settings: Settings) -> APIRouter:
+def pages_router(settings: Settings, limits: Limits) -> APIRouter:
     router = APIRouter(include_in_schema=False)
     rendered = {
         "/": _home(settings),
-        "/privacy": _privacy(settings),
+        "/privacy": _privacy(settings, limits),
         "/terms": _terms(settings),
         "/support": _support(settings),
     }

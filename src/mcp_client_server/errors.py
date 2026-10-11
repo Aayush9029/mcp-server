@@ -1,6 +1,25 @@
+from typing import ClassVar, Literal
+
+ErrorCode = Literal[
+    "bad_request",
+    "unauthorized",
+    "forbidden",
+    "not_found",
+    "method_not_allowed",
+    "conflict",
+    "validation_failed",
+    "rate_limited",
+    "internal",
+    "unavailable",
+    "attestation_required",
+    "attestation_invalid",
+    "app_code_invalid",
+]
+
+
 class AppError(Exception):
-    status = 500
-    code = "internal"
+    status: ClassVar[int] = 500
+    code: ClassVar[ErrorCode] = "internal"
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -10,6 +29,18 @@ class AppError(Exception):
 class Unauthorized(AppError):
     status = 401
     code = "unauthorized"
+
+
+class AttestationRequired(Unauthorized):
+    code = "attestation_required"
+
+
+class AttestationInvalid(Unauthorized):
+    code = "attestation_invalid"
+
+
+class AppCodeInvalid(Unauthorized):
+    code = "app_code_invalid"
 
 
 class Forbidden(AppError):
@@ -28,7 +59,7 @@ class Conflict(AppError):
 
 
 class LimitReached(Conflict):
-    """A count limit from docs/api.md is full."""
+    pass
 
 
 class ValidationFailed(AppError):
@@ -47,3 +78,12 @@ class RateLimited(AppError):
     def __init__(self, message: str, retry_after: int) -> None:
         super().__init__(message)
         self.retry_after = max(1, retry_after)
+
+
+class StoreUnavailable(AppError):
+    status = 503
+    code = "unavailable"
+    retry_after: ClassVar[int] = 2
+
+    def __init__(self, message: str = "The service is not available now. Try again in a few seconds.") -> None:
+        super().__init__(message)

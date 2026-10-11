@@ -1,10 +1,19 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 from redis.asyncio import Redis
 
-from mcp_client_server import limits
+from mcp_client_server.credentials import AccountPrincipal, AgentPrincipal, CredentialHash, Principal
+from mcp_client_server.ids import AccountId, DeviceId, KeyId, QuestionId, TaskId
+from mcp_client_server.limits import (
+    ATTEST_CHALLENGE_TTL_SECONDS,
+    LAST_USED_WRITE_INTERVAL_SECONDS,
+    WIDGET_PUSH_INTERVAL_SECONDS,
+    Limits,
+)
 from mcp_client_server.models import (
+    QUESTION_STATUSES,
     STATUSES,
     Account,
     AccountSettings,
@@ -12,33 +21,79 @@ from mcp_client_server.models import (
     Device,
     Key,
     KeyCounts,
+    Question,
+    QuestionStatus,
     Status,
     Task,
 )
 from mcp_client_server.store import scripts
+from mcp_client_server.store.client import (
+    Arg,
+    KeyValue,
+    ReplyError,
+    integer,
+    items,
+    opt_text,
+    text,
+    text_map,
+    text_set,
+    texts,
+)
 from mcp_client_server.store.schema import KeySpace
 
-AuthStatus = Literal["ok", "unknown", "limited"]
-WriteStatus = Literal["ok", "conflict", "limit", "no_key", "no_account", "no_task", "no_device"]
+DeviceTokenField = Literal["apns_token", "push_to_start_token", "widget_push_token"]
 
 
 @dataclass(frozen=True, slots=True)
 class AuthResult:
-    status: AuthStatus
-    account_id: str = ""
-    key_id: str | None = None
+    principal: Principal | None
+    limited: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class KeyTasks:
+    key_id: KeyId
+
+
+@dataclass(frozen=True, slots=True)
+class AccountTasks:
+    account_id: AccountId
+
+
+type TaskScope = KeyTasks | AccountTasks
 
 
 @dataclass(frozen=True, slots=True)
 class StoredTask:
+    """A task with the exact JSON that the store has. The JSON is the guard of the next write."""
+
     raw: str
     task: Task
 
 
 @dataclass(frozen=True, slots=True)
+class StoredQuestion:
+    raw: str
+    question: Question
+
+
+@dataclass(frozen=True, slots=True)
+class DeletedTask:
+    activities: dict[DeviceId, str]
+    pending_questions: list[QuestionId]
+
+
+@dataclass(frozen=True, slots=True)
+class AttestedKey:
+    key_id: str
+    public_key: str
+    counter: int
+
+
+@dataclass(frozen=True, slots=True)
 class Cursor:
     score: float
-    task_id: str
+    task_id: TaskId
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +106,7 @@ class RawPage:
 @dataclass(frozen=True, slots=True)
 class EndedActivity:
     task: Task
-    tokens: dict[str, str]
+    tokens: dict[DeviceId, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,23 +114,35 @@ class PushContext:
     key_label: str
     live_activities: bool
     devices: list[Device]
-    activities: dict[str, str]
-
-
-def _pairs(flat: list[str]) -> dict[str, str]:
-    return dict(zip(flat[::2], flat[1::2], strict=True))
+    activities: dict[DeviceId, str]
+    # The oldest pending question of the task. The Live Activity shows it.
+    question: Question | None = None
 
 
 def _score(value: float) -> str:
     return repr(value)
 
 
+def _one_of[T: str](reply: object, *allowed: T) -> T:
+    for status in allowed:
+        if reply == status:
+            return status
+    raise ReplyError(" or ".join(allowed), reply)
+
+
+def _tokens(reply: object) -> dict[DeviceId, str]:
+    return {DeviceId(device_id): token for device_id, token in text_map(reply).items()}
+
+
 class Store:
-    def __init__(self, redis: Redis, prefix: str) -> None:
-        self._r = redis
+    """The only code that talks to Key Value."""
+
+    def __init__(self, redis: Redis, prefix: str, limits: Limits | None = None) -> None:
+        self._kv = KeyValue(redis)
+        self._limits = limits or Limits()
         self.keys = KeySpace(prefix)
         self._p = prefix
-        reg = redis.register_script
+        reg = self._kv.script
         self._auth = reg(scripts.AUTH)
         self._rate_hit = reg(scripts.RATE_HIT)
         self._hash_update = reg(scripts.HASH_UPDATE)
@@ -91,110 +158,140 @@ class Store:
         self._task_page = reg(scripts.TASK_PAGE)
         self._activity_put = reg(scripts.ACTIVITY_PUT)
         self._activity_delete = reg(scripts.ACTIVITY_DELETE)
+        self._account_create = reg(scripts.ACCOUNT_CREATE)
+        self._question_create = reg(scripts.QUESTION_CREATE)
+        self._question_close = reg(scripts.QUESTION_CLOSE)
+        self._question_purge = reg(scripts.QUESTION_PURGE)
+        self._question_list = reg(scripts.QUESTION_LIST)
+        self._widget_slot = reg(scripts.WIDGET_SLOT)
 
-    async def _call(self, *args: Any) -> Any:
-        # redis-py gives no type for the reply of a raw command.
-        return await self._r.execute_command(*args)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    async def ping(self) -> None:
+        await self._kv.call("PING")
 
-    async def ping(self) -> bool:
-        return bool(await self._call("PING"))
-
-    async def publish(self, account_id: str, frame: str) -> None:
-        await self._call("PUBLISH", self.keys.channel(account_id), frame)
+    async def publish(self, account_id: AccountId, frame: str) -> None:
+        await self._kv.call("PUBLISH", self.keys.channel(account_id), frame)
 
     # Credentials and rate limits
 
     async def authenticate(
-        self, cred_hash: str, *, now: float, rate_limit: int, rate_bucket: str, rate_ttl: int
+        self, cred_hash: CredentialHash, *, now: float, rate_limit: int, rate_bucket: str, rate_ttl: int
     ) -> AuthResult:
-        reply = await self._auth(
-            args=[
-                self._p,
-                cred_hash,
-                _score(now),
-                rate_limit,
-                rate_bucket,
-                rate_ttl,
-                limits.LAST_USED_WRITE_INTERVAL_SECONDS,
-            ]
+        reply = items(
+            await self._auth(
+                args=[
+                    self._p,
+                    cred_hash,
+                    _score(now),
+                    rate_limit,
+                    rate_bucket,
+                    rate_ttl,
+                    LAST_USED_WRITE_INTERVAL_SECONDS,
+                ]
+            )
         )
-        code = int(reply[0])
+        code = integer(reply[0])
         if code == 0:
-            return AuthResult("unknown")
-        kind, _, rest = str(reply[1]).partition(":")
+            return AuthResult(None)
+        kind, _, rest = text(reply[1]).partition(":")
+        principal: Principal
         if kind == "a":
-            account_id, key_id = rest, None
+            principal = AccountPrincipal(AccountId(rest))
         else:
             account_id, _, key_id = rest.partition(":")
-        return AuthResult("ok" if code == 1 else "limited", account_id, key_id)
+            principal = AgentPrincipal(AccountId(account_id), KeyId(key_id))
+        return AuthResult(principal, limited=code != 1)
 
     async def hit(self, bucket: str, ttl: int) -> int:
-        return int(await self._rate_hit(keys=[self.keys.rate(bucket)], args=[ttl]))
+        return integer(await self._rate_hit(keys=[self.keys.rate(bucket)], args=[ttl]))
 
     # Accounts
 
-    async def create_account(self, account: Account, cred_hash: str) -> None:
-        pipe = self._r.pipeline(transaction=True)
-        pipe.hset(
-            self.keys.account(account.id),
-            mapping={
-                "id": account.id,
-                "created_at": _score(account.created_at),
-                "live_activities": "1" if account.settings.live_activities else "0",
-                "cred": cred_hash,
-            },
+    async def create_account(
+        self, account: Account, cred_hash: CredentialHash, attested: AttestedKey | None = None
+    ) -> Literal["ok", "key_used"]:
+        reply = await self._account_create(
+            args=[
+                self._p,
+                account.id,
+                cred_hash,
+                _score(account.created_at),
+                "1" if account.settings.live_activities else "0",
+                attested.key_id if attested else "",
+                attested.public_key if attested else "",
+                attested.counter if attested else 0,
+            ]
         )
-        pipe.set(self.keys.credential(cred_hash), f"a:{account.id}")
-        await pipe.execute()
+        return _one_of(reply, "ok", "key_used")
 
-    async def get_account(self, account_id: str) -> Account | None:
-        fields: dict[str, str] = await self._call("HGETALL", self.keys.account(account_id))
+    async def put_challenge(self, challenge: str, issued_at: float) -> None:
+        # The store removes a challenge that nobody used. The service compares the time, so a test can move the clock.
+        key = self.keys.attest_challenge(challenge)
+        await self._kv.call("SET", key, _score(issued_at), "EX", 2 * ATTEST_CHALLENGE_TTL_SECONDS)
+
+    async def take_challenge(self, challenge: str) -> float | None:
+        """The time the challenge was made. Each challenge is given one time, then it is gone."""
+        issued_at = opt_text(await self._kv.call("GETDEL", self.keys.attest_challenge(challenge)))
+        return float(issued_at) if issued_at else None
+
+    async def get_account(self, account_id: AccountId) -> Account | None:
+        fields = text_map(await self._kv.call("HGETALL", self.keys.account(account_id)))
         return _account(fields) if fields else None
 
-    async def set_live_activities(self, account_id: str, enabled: bool) -> Account | None:
+    async def set_live_activities(self, account_id: AccountId, *, enabled: bool) -> Account | None:
         reply = await self._hash_update(
             keys=[self.keys.account(account_id)],
             args=["id", account_id, "live_activities", "1" if enabled else "0"],
         )
-        return _account(_pairs(reply)) if reply else None
+        return None if reply is None else _account(text_map(items(reply)[1]))
 
-    async def delete_account(self, account_id: str, event: str) -> bool:
-        return bool(await self._account_delete(args=[self._p, account_id, event]))
+    async def delete_account(self, account_id: AccountId, event: str) -> bool:
+        return integer(await self._account_delete(args=[self._p, account_id, event])) == 1
 
     # Devices
 
-    async def put_device(self, account_id: str, device: Device) -> WriteStatus:
-        fields = {
-            "platform": device.platform,
-            "model": device.model,
-            "os_version": device.os_version,
-            "app_version": device.app_version,
-            "apns_environment": device.apns_environment,
-            "apns_token": device.apns_token or "",
-            "push_to_start_token": device.push_to_start_token or "",
-            "updated_at": _score(device.updated_at),
-        }
-        flat = [item for pair in fields.items() for item in pair]
-        return await self._device_put(args=[self._p, account_id, device.id, limits.MAX_DEVICES_PER_ACCOUNT, *flat])
+    async def put_device(self, account_id: AccountId, device: Device) -> Literal["ok", "limit", "no_account"]:
+        fields = (
+            "platform",
+            device.platform,
+            "model",
+            device.model,
+            "os_version",
+            device.os_version,
+            "app_version",
+            device.app_version,
+            "apns_environment",
+            device.apns_environment,
+            "apns_token",
+            device.apns_token or "",
+            "push_to_start_token",
+            device.push_to_start_token or "",
+            "widget_push_token",
+            device.widget_push_token or "",
+            "updated_at",
+            _score(device.updated_at),
+        )
+        reply = await self._device_put(
+            args=[self._p, account_id, device.id, self._limits.max_devices_per_account, *fields]
+        )
+        return _one_of(reply, "ok", "limit", "no_account")
 
-    async def delete_device(self, account_id: str, device_id: str) -> bool:
-        return bool(await self._device_delete(args=[self._p, account_id, device_id]))
+    async def delete_device(self, account_id: AccountId, device_id: DeviceId) -> bool:
+        return integer(await self._device_delete(args=[self._p, account_id, device_id])) == 1
 
-    async def list_devices(self, account_id: str) -> list[Device]:
-        ids: set[str] = await self._call("SMEMBERS", self.keys.account_devices(account_id))
-        return await self._load_devices(account_id, sorted(ids))
+    async def list_devices(self, account_id: AccountId) -> list[Device]:
+        ids = text_set(await self._kv.call("SMEMBERS", self.keys.account_devices(account_id)))
+        return await self._load_devices(account_id, ids)
 
-    async def _load_devices(self, account_id: str, device_ids: list[str]) -> list[Device]:
+    async def _load_devices(self, account_id: AccountId, device_ids: set[str]) -> list[Device]:
         if not device_ids:
             return []
-        pipe = self._r.pipeline(transaction=False)
-        for device_id in device_ids:
-            pipe.hgetall(self.keys.device(account_id, device_id))
-        rows = await pipe.execute()
-        return [_device(device_id, row) for device_id, row in zip(device_ids, rows, strict=True) if row]
+        ordered = [DeviceId(device_id) for device_id in sorted(device_ids)]
+        rows = await self._kv.batch(("HGETALL", self.keys.device(account_id, device_id)) for device_id in ordered)
+        devices = ((device_id, text_map(row)) for device_id, row in zip(ordered, rows, strict=True))
+        return [_device(device_id, fields) for device_id, fields in devices if fields]
 
     async def clear_device_token(
-        self, account_id: str, device_id: str, field: Literal["apns_token", "push_to_start_token"], token: str
+        self, account_id: AccountId, device_id: DeviceId, field: DeviceTokenField, token: str
     ) -> None:
         keys = [self.keys.device(account_id, device_id)]
         if field == "apns_token":
@@ -203,14 +300,16 @@ class Store:
 
     # Keys
 
-    async def create_key(self, account_id: str, key: Key, cred_hash: str, event: str) -> WriteStatus:
-        return await self._key_create(
+    async def create_key(
+        self, account_id: AccountId, key: Key, cred_hash: CredentialHash, event: str
+    ) -> Literal["ok", "limit", "no_account"]:
+        reply = await self._key_create(
             args=[
                 self._p,
                 account_id,
                 key.id,
                 cred_hash,
-                limits.MAX_KEYS_PER_ACCOUNT,
+                self._limits.max_keys_per_account,
                 _score(key.created_at),
                 key.label,
                 key.prefix,
@@ -218,44 +317,56 @@ class Store:
                 event,
             ]
         )
+        return _one_of(reply, "ok", "limit", "no_account")
 
-    async def get_key(self, account_id: str, key_id: str) -> Key | None:
-        fields: dict[str, str] = await self._call("HGETALL", self.keys.key(key_id))
+    async def get_key(self, account_id: AccountId, key_id: KeyId) -> Key | None:
+        fields = text_map(await self._kv.call("HGETALL", self.keys.key(key_id)))
         if not fields or fields.get("account_id") != account_id:
             return None
         return _key(key_id, fields)
 
-    async def list_keys(self, account_id: str) -> list[Key]:
-        ids: list[str] = await self._call("ZREVRANGE", self.keys.account_keys(account_id), 0, -1)
+    async def list_keys(self, account_id: AccountId) -> list[Key]:
+        ids = [
+            KeyId(key_id)
+            for key_id in texts(items(await self._kv.call("ZREVRANGE", self.keys.account_keys(account_id), 0, -1)))
+        ]
         if not ids:
             return []
-        pipe = self._r.pipeline(transaction=False)
-        for key_id in ids:
-            pipe.hgetall(self.keys.key(key_id))
-        rows = await pipe.execute()
-        return [_key(key_id, row) for key_id, row in zip(ids, rows, strict=True) if row]
+        rows = await self._kv.batch(("HGETALL", self.keys.key(key_id)) for key_id in ids)
+        keys = ((key_id, text_map(row)) for key_id, row in zip(ids, rows, strict=True))
+        return [_key(key_id, fields) for key_id, fields in keys if fields]
 
-    async def set_key_label(self, account_id: str, key_id: str, label: str) -> Key | None:
+    async def set_key_label(self, account_id: AccountId, key_id: KeyId, label: str) -> Key | None:
         reply = await self._hash_update(keys=[self.keys.key(key_id)], args=["account_id", account_id, "label", label])
-        return _key(key_id, _pairs(reply)) if reply else None
+        return None if reply is None else _key(key_id, text_map(items(reply)[1]))
 
-    async def set_key_client(self, account_id: str, key_id: str, client: ClientInfo) -> Key | None:
+    async def set_key_client(self, account_id: AccountId, key_id: KeyId, client: ClientInfo) -> Key | None:
+        """Write `last_client`. Returns the key only if the client is a different one than before."""
         reply = await self._hash_update(
             keys=[self.keys.key(key_id)],
             args=["account_id", account_id, "client_name", client.name, "client_version", client.version],
         )
-        return _key(key_id, _pairs(reply)) if reply else None
+        if reply is None:
+            return None
+        changed, fields = items(reply)
+        return _key(key_id, text_map(fields)) if integer(changed) == 1 else None
 
-    async def delete_key(self, account_id: str, key_id: str, event: str) -> list[EndedActivity] | None:
+    async def delete_key(self, account_id: AccountId, key_id: KeyId, event: str) -> list[EndedActivity] | None:
+        """Delete a key and its tasks. Returns the Live Activities of the tasks, or None if the key is not there."""
         reply = await self._key_delete(args=[self._p, account_id, key_id, event])
         if reply is None:
             return None
-        return [EndedActivity(Task.model_validate_json(raw), _pairs(pairs)) for raw, pairs in reply if raw]
+        ended: list[EndedActivity] = []
+        for entry in items(reply):
+            raw, tokens = items(entry)
+            if raw is not None:
+                ended.append(EndedActivity(Task.model_validate_json(text(raw)), _tokens(tokens)))
+        return ended
 
     # Tasks
 
-    async def create_task(self, account_id: str, task: Task, event: str) -> WriteStatus:
-        return await self._task_create(
+    async def create_task(self, account_id: AccountId, task: Task, event: str) -> Literal["ok", "limit", "no_key"]:
+        reply = await self._task_create(
             args=[
                 self._p,
                 account_id,
@@ -264,23 +375,22 @@ class Store:
                 task.model_dump_json(),
                 task.status,
                 _score(task.updated_at),
-                limits.MAX_OPEN_TASKS_PER_KEY,
+                self._limits.max_open_tasks_per_key,
                 event,
             ]
         )
+        return _one_of(reply, "ok", "limit", "no_key")
 
-    async def get_task(self, index: str, task_id: str) -> StoredTask | None:
-        """Read a task only if it is a member of `index` (the tasks of one key or of one account)."""
-        pipe = self._r.pipeline(transaction=False)
-        pipe.zscore(index, task_id)
-        pipe.get(self.keys.task(task_id))
-        score, raw = await pipe.execute()
+    async def get_task(self, scope: TaskScope, task_id: TaskId) -> StoredTask | None:
+        score, raw = await self._kv.batch([("ZSCORE", self._index(scope), task_id), ("GET", self.keys.task(task_id))])
         if score is None or raw is None:
             return None
-        return StoredTask(raw, Task.model_validate_json(raw))
+        return _stored(text(raw))
 
-    async def update_task(self, account_id: str, old: StoredTask, new: Task, event: str) -> WriteStatus:
-        return await self._task_update(
+    async def update_task(
+        self, account_id: AccountId, old: StoredTask, new: Task, event: str
+    ) -> Literal["ok", "conflict", "limit"]:
+        reply = await self._task_update(
             args=[
                 self._p,
                 account_id,
@@ -291,108 +401,249 @@ class Store:
                 old.task.status,
                 new.status,
                 _score(new.updated_at),
-                limits.MAX_OPEN_TASKS_PER_KEY,
+                self._limits.max_open_tasks_per_key,
                 event,
             ]
         )
+        return _one_of(reply, "ok", "conflict", "limit")
 
-    async def delete_task(self, account_id: str, stored: StoredTask, event: str) -> dict[str, str] | None:
-        """Delete a task. Returns its Live Activity tokens, or None on a concurrent write."""
+    async def delete_task(self, account_id: AccountId, stored: StoredTask, event: str) -> DeletedTask | None:
+        """Delete a task. Returns what the task had, or None on a concurrent write."""
         task = stored.task
         reply = await self._task_delete(
             args=[self._p, account_id, task.key_id, task.id, stored.raw, task.status, event]
         )
-        return None if reply is None else _pairs(reply)
+        if reply is None:
+            return None
+        activities, questions = items(reply)
+        return DeletedTask(_tokens(activities), [QuestionId(item) for item in texts(items(questions))])
 
-    async def page_tasks(self, index: str, statuses: list[Status], count: int, cursor: Cursor | None) -> RawPage:
-        ordered = [s for s in STATUSES if s in statuses]
-        reply = await self._task_page(
-            args=[
-                index,
-                self.keys.task_prefix,
-                count,
-                _score(cursor.score) if cursor else "",
-                cursor.task_id if cursor else "",
-                *ordered,
-            ]
+    async def page_tasks(
+        self, scope: TaskScope, statuses: Sequence[Status], count: int, cursor: Cursor | None
+    ) -> RawPage:
+        reply = items(
+            await self._task_page(
+                args=[
+                    self._index(scope),
+                    self.keys.task_prefix,
+                    count,
+                    _score(cursor.score) if cursor else "",
+                    cursor.task_id if cursor else "",
+                    *(status for status in STATUSES if status in statuses),
+                ]
+            )
         )
-        last = Cursor(float(reply[1]), reply[2]) if reply[2] else None
-        return RawPage(docs=reply[3:], last=last, has_more=bool(reply[0]))
+        last_id = text(reply[2])
+        last = Cursor(float(text(reply[1])), TaskId(last_id)) if last_id else None
+        return RawPage(docs=texts(reply[3:]), last=last, has_more=integer(reply[0]) == 1)
 
-    async def closed_before(self, cutoff: float, count: int) -> list[str]:
-        return await self._call("ZRANGEBYSCORE", self.keys.closed, "-inf", _score(cutoff), "LIMIT", 0, count)
+    async def closed_before(self, cutoff: float, count: int) -> list[TaskId]:
+        reply = await self._kv.call("ZRANGEBYSCORE", self.keys.closed, "-inf", _score(cutoff), "LIMIT", 0, count)
+        return [TaskId(task_id) for task_id in texts(items(reply))]
 
-    async def get_task_unscoped(self, task_id: str) -> StoredTask | None:
-        raw: str | None = await self._call("GET", self.keys.task(task_id))
-        return StoredTask(raw, Task.model_validate_json(raw)) if raw else None
+    async def get_task_unscoped(self, task_id: TaskId) -> StoredTask | None:
+        raw = opt_text(await self._kv.call("GET", self.keys.task(task_id)))
+        return _stored(raw) if raw else None
 
-    async def key_account(self, key_id: str) -> str | None:
-        return await self._call("HGET", self.keys.key(key_id), "account_id")
+    async def key_account(self, key_id: KeyId) -> AccountId | None:
+        account_id = opt_text(await self._kv.call("HGET", self.keys.key(key_id), "account_id"))
+        return AccountId(account_id) if account_id else None
 
-    async def forget_closed(self, task_id: str) -> None:
-        await self._call("ZREM", self.keys.closed, task_id)
+    async def forget_closed(self, task_id: TaskId) -> None:
+        await self._kv.call("ZREM", self.keys.closed, task_id)
 
     async def acquire_lock(self, name: str, ttl: int) -> bool:
-        return bool(await self._call("SET", self.keys.lock(name), "1", "NX", "EX", ttl))
+        return await self._kv.call("SET", self.keys.lock(name), "1", "NX", "EX", ttl) is not None
 
     # Live Activities
 
-    async def put_activity(self, account_id: str, task_id: str, device_id: str, token: str) -> WriteStatus:
-        return await self._activity_put(args=[self._p, account_id, task_id, device_id, token])
+    async def put_activity(
+        self, account_id: AccountId, task_id: TaskId, device_id: DeviceId, token: str
+    ) -> Literal["ok", "no_task", "no_device"]:
+        reply = await self._activity_put(args=[self._p, account_id, task_id, device_id, token])
+        return _one_of(reply, "ok", "no_task", "no_device")
 
-    async def delete_activity(self, account_id: str, task_id: str, device_id: str) -> bool:
-        return bool(await self._activity_delete(args=[self._p, account_id, task_id, device_id]))
+    async def delete_activity(self, account_id: AccountId, task_id: TaskId, device_id: DeviceId) -> bool:
+        return integer(await self._activity_delete(args=[self._p, account_id, task_id, device_id])) == 1
 
-    async def clear_activities(self, task_id: str) -> None:
-        await self._call("DEL", self.keys.activities(task_id))
+    async def clear_activities(self, task_id: TaskId) -> None:
+        await self._kv.call("DEL", self.keys.activities(task_id))
 
-    async def forget_activity(self, task_id: str, device_id: str, token: str | None = None) -> None:
+    async def forget_activity(self, task_id: TaskId, device_id: DeviceId, token: str | None = None) -> None:
+        """Remove one registration. With `token`, only if the registration still has that token."""
         key = self.keys.activities(task_id)
         if token is None:
-            await self._call("HDEL", key, device_id)
+            await self._kv.call("HDEL", key, device_id)
         else:
             await self._hash_clear(keys=[key], args=[device_id, token, "del"])
 
     # Push
 
-    async def push_context(self, account_id: str, key_id: str, task_id: str | None) -> PushContext:
-        pipe = self._r.pipeline(transaction=False)
-        pipe.hget(self.keys.key(key_id), "label")
-        pipe.hget(self.keys.account(account_id), "live_activities")
-        pipe.smembers(self.keys.account_devices(account_id))
+    async def push_context(self, account_id: AccountId, key_id: KeyId, task_id: TaskId | None) -> PushContext:
+        commands: list[tuple[Arg, ...]] = [
+            ("HGET", self.keys.key(key_id), "label"),
+            ("HGET", self.keys.account(account_id), "live_activities"),
+            ("SMEMBERS", self.keys.account_devices(account_id)),
+        ]
         if task_id:
-            pipe.hgetall(self.keys.activities(task_id))
-        reply: list[Any] = await pipe.execute()
-        devices = await self._load_devices(account_id, sorted(reply[2]))
+            commands.append(("HGETALL", self.keys.activities(task_id)))
+            commands.append(("ZRANGE", self.keys.task_questions(task_id), 0, 0))
+        reply = await self._kv.batch(commands)
+        waiting = texts(items(reply[4])) if task_id else []
+        question = await self.get_question_unscoped(QuestionId(waiting[0])) if waiting else None
         return PushContext(
-            key_label=reply[0] or "",
+            key_label=opt_text(reply[0]) or "",
             live_activities=reply[1] == "1",
-            devices=devices,
-            activities=reply[3] if task_id else {},
+            devices=await self._load_devices(account_id, text_set(reply[2])),
+            activities=_tokens(reply[3]) if task_id else {},
+            question=question.question if question else None,
         )
+
+    async def widget_slot(self, account_id: AccountId, device_id: DeviceId) -> bool:
+        """True if a WidgetKit push can go to the device now. False marks the device for one push later."""
+        keys = [self.keys.widget_throttle(account_id, device_id), self.keys.widget_dirty(account_id, device_id)]
+        return integer(await self._widget_slot(keys=keys, args=[WIDGET_PUSH_INTERVAL_SECONDS])) == 1
+
+    async def renew_widget_slot(self, account_id: AccountId, device_id: DeviceId) -> None:
+        await self._kv.call(
+            "SET", self.keys.widget_throttle(account_id, device_id), "1", "EX", WIDGET_PUSH_INTERVAL_SECONDS
+        )
+
+    async def widget_throttled(self, account_id: AccountId, device_id: DeviceId) -> bool:
+        return integer(await self._kv.call("EXISTS", self.keys.widget_throttle(account_id, device_id))) == 1
+
+    async def take_widget_mark(self, account_id: AccountId, device_id: DeviceId) -> bool:
+        """True if a change came while the throttle of the device was on."""
+        return await self._kv.call("GETDEL", self.keys.widget_dirty(account_id, device_id)) is not None
+
+    # Questions
+
+    async def create_question(
+        self, account_id: AccountId, question: Question, event: str
+    ) -> Literal["ok", "limit", "no_key", "no_task"]:
+        reply = await self._question_create(
+            args=[
+                self._p,
+                account_id,
+                question.key_id,
+                question.id,
+                question.model_dump_json(),
+                _score(question.created_at),
+                _score(question.expires_at),
+                self._limits.max_pending_questions_per_key,
+                question.task_id or "",
+                event,
+            ]
+        )
+        return _one_of(reply, "ok", "limit", "no_key", "no_task")
+
+    async def get_question(self, scope: TaskScope, question_id: QuestionId) -> StoredQuestion | None:
+        """Read a question only if it is in the indexes of `scope` (one key or one account)."""
+        base = self._question_index(scope)
+        commands: list[tuple[Arg, ...]] = [("ZSCORE", base + status, question_id) for status in QUESTION_STATUSES]
+        *scores, raw = await self._kv.batch([*commands, ("GET", self.keys.question(question_id))])
+        if raw is None or all(score is None for score in scores):
+            return None
+        return _stored_question(text(raw))
+
+    async def get_question_unscoped(self, question_id: QuestionId) -> StoredQuestion | None:
+        raw = opt_text(await self._kv.call("GET", self.keys.question(question_id)))
+        return _stored_question(raw) if raw else None
+
+    async def list_questions(self, scope: TaskScope, statuses: Sequence[QuestionStatus], count: int) -> list[str]:
+        """The stored JSON of the newest questions with one of the statuses, newest first."""
+        wanted = [status for status in QUESTION_STATUSES if status in statuses]
+        reply = await self._question_list(args=[self._question_index(scope), self.keys.question_prefix, count, *wanted])
+        return texts(items(reply))
+
+    async def close_question(
+        self, account_id: AccountId, old: StoredQuestion, new: Question, closed_at: float, event: str
+    ) -> Literal["ok", "conflict"]:
+        reply = await self._question_close(
+            args=[
+                self._p,
+                account_id,
+                new.key_id,
+                new.id,
+                old.raw,
+                new.model_dump_json(),
+                new.status,
+                _score(new.created_at),
+                _score(closed_at),
+                new.task_id or "",
+                event,
+            ]
+        )
+        return _one_of(reply, "ok", "conflict")
+
+    async def purge_question(self, account_id: AccountId, question: Question) -> None:
+        await self._question_purge(args=[self._p, account_id, question.key_id, question.id, question.status])
+
+    async def questions_due(self, now: float, count: int) -> list[QuestionId]:
+        """Pending questions with an `expires_at` that is not after `now`."""
+        reply = await self._kv.call("ZRANGEBYSCORE", self.keys.questions_due, "-inf", _score(now), "LIMIT", 0, count)
+        return [QuestionId(item) for item in texts(items(reply))]
+
+    async def questions_closed_before(self, cutoff: float, count: int) -> list[QuestionId]:
+        reply = await self._kv.call(
+            "ZRANGEBYSCORE", self.keys.questions_closed, "-inf", _score(cutoff), "LIMIT", 0, count
+        )
+        return [QuestionId(item) for item in texts(items(reply))]
+
+    async def forget_question(self, question_id: QuestionId, index: Literal["due", "closed"]) -> None:
+        """Remove an ID that has no pending or closed question from one of the expiry indexes."""
+        key = self.keys.questions_due if index == "due" else self.keys.questions_closed
+        await self._kv.call("ZREM", key, question_id)
+
+    def _question_index(self, scope: TaskScope) -> str:
+        match scope:
+            case KeyTasks(key_id):
+                return self.keys.key_questions(key_id)
+            case AccountTasks(account_id):
+                return self.keys.account_questions(account_id)
+
+    def _index(self, scope: TaskScope) -> str:
+        match scope:
+            case KeyTasks(key_id):
+                return self.keys.key_tasks(key_id)
+            case AccountTasks(account_id):
+                return self.keys.account_tasks(account_id)
+
+
+def _stored_question(raw: str) -> StoredQuestion:
+    return StoredQuestion(raw, Question.model_validate_json(raw))
+
+
+def _stored(raw: str) -> StoredTask:
+    return StoredTask(raw, Task.model_validate_json(raw))
 
 
 def _account(fields: dict[str, str]) -> Account:
     return Account(
-        id=fields["id"],
+        id=AccountId(fields["id"]),
         created_at=float(fields["created_at"]),
         settings=AccountSettings(live_activities=fields.get("live_activities", "1") == "1"),
     )
 
 
-def _device(device_id: str, fields: dict[str, str]) -> Device:
+def _device(device_id: DeviceId, fields: dict[str, str]) -> Device:
     return Device.model_validate(
         {
             **fields,
             "id": device_id,
             "apns_token": fields.get("apns_token") or None,
             "push_to_start_token": fields.get("push_to_start_token") or None,
+            "widget_push_token": fields.get("widget_push_token") or None,
             "updated_at": float(fields["updated_at"]),
         }
     )
 
 
-def _key(key_id: str, fields: dict[str, str]) -> Key:
+def _count(fields: dict[str, str], status: Status) -> int:
+    return max(0, int(fields.get(f"n:{status}", 0)))
+
+
+def _key(key_id: KeyId, fields: dict[str, str]) -> Key:
     client = None
     if fields.get("client_name"):
         client = ClientInfo(name=fields["client_name"], version=fields.get("client_version", ""))
@@ -405,5 +656,10 @@ def _key(key_id: str, fields: dict[str, str]) -> Key:
         created_at=float(fields["created_at"]),
         last_used_at=float(last_used) if last_used else None,
         last_client=client,
-        counts=KeyCounts(**{status: max(0, int(fields.get(f"n:{status}", 0))) for status in STATUSES}),
+        counts=KeyCounts(
+            todo=_count(fields, "todo"),
+            in_progress=_count(fields, "in_progress"),
+            done=_count(fields, "done"),
+            cancelled=_count(fields, "cancelled"),
+        ),
     )

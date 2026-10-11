@@ -4,14 +4,13 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
-from mcp_client_server.models import Task
+from mcp_client_server.ids import TaskId
+from mcp_client_server.models import Question, Task
 
 _DESCRIPTION_PREVIEW = 4000
 
 
-def iso(timestamp: float | None) -> str | None:
-    if timestamp is None:
-        return None
+def iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
@@ -23,10 +22,22 @@ class TaskOut(Task):
     @classmethod
     def of(cls, task: Task) -> "TaskOut":
         return cls(
-            **task.model_dump(),
-            created_at_iso=iso(task.created_at) or "",
-            updated_at_iso=iso(task.updated_at) or "",
-            completed_at_iso=iso(task.completed_at),
+            id=task.id,
+            key_id=task.key_id,
+            title=task.title,
+            description=task.description,
+            status=task.status,
+            priority=task.priority,
+            notify=task.notify,
+            progress=task.progress,
+            status_note=task.status_note,
+            source=task.source,
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+            completed_at=task.completed_at,
+            created_at_iso=iso(task.created_at),
+            updated_at_iso=iso(task.updated_at),
+            completed_at_iso=None if task.completed_at is None else iso(task.completed_at),
         )
 
 
@@ -35,9 +46,28 @@ class TaskListOut(BaseModel):
     next_cursor: str | None
 
 
+class OpenTasksOut(BaseModel):
+    tasks: list[TaskOut]
+
+
 class DeleteOut(BaseModel):
     deleted: bool
-    task_id: str
+    task_id: TaskId
+
+
+def question_summary(question: Question) -> str:
+    match question.status:
+        case "answered":
+            return f'Question {question.id} has the answer "{question.answer}".'
+        case "pending":
+            return (
+                f"Question {question.id} has no answer yet. Call get_answer with this question_id to wait again, "
+                "or continue with other work. Do not guess the answer."
+            )
+        case "expired":
+            return f"Question {question.id} expired with no answer. Do not guess the answer."
+        case "cancelled":
+            return f"Question {question.id} was cancelled."
 
 
 def line(task: Task) -> str:

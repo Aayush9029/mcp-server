@@ -1,11 +1,10 @@
 """The MCP surface. Each tool calls the same service functions that the REST routes call."""
 
 import functools
-import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Annotated, Any, cast
+from typing import Annotated, TypeIs
 
 from mcp.server import CacheHint, MCPServer, ServerRequestContext
 from mcp.server.context import CallNext, HandlerResult
@@ -18,10 +17,12 @@ from pydantic import BaseModel, BeforeValidator, Field, ValidationError
 from starlette.routing import Route
 
 from mcp_client_server import __version__, limits
-from mcp_client_server.errors import AppError, NotFound, RateLimited, ValidationFailed
+from mcp_client_server.errors import AppError, NotFound, RateLimited, StoreUnavailable, ValidationFailed
+from mcp_client_server.ids import QuestionId, TaskId
+from mcp_client_server.limits import Limits
 from mcp_client_server.mcp import views
 from mcp_client_server.mcp.endpoint import McpEndpoint, current_principal, optional_principal
-from mcp_client_server.mcp.views import DeleteOut, TaskListOut, TaskOut
+from mcp_client_server.mcp.views import DeleteOut, OpenTasksOut, TaskListOut, TaskOut
 from mcp_client_server.models import (
     CLOSED_STATUSES,
     Description,
@@ -29,15 +30,23 @@ from mcp_client_server.models import (
     NotifyInput,
     NotifyResult,
     NotifyTitle,
+    Option,
     Priority,
+    Prompt,
+    Question,
+    QuestionCreate,
+    QuestionKind,
     Status,
     StatusNote,
     TaskCreate,
     TaskPatch,
     Title,
+    WaitSeconds,
+    split_commas,
 )
 from mcp_client_server.services import Services
 from mcp_client_server.services.keys import KeyService
+from mcp_client_server.services.questions import QuestionService
 from mcp_client_server.services.tasks import TaskService
 
 logger = logging.getLogger(__name__)
@@ -52,17 +61,20 @@ def instructions(app_name: str) -> str:
         "1. Create a task before you start a unit of work that takes more than a few minutes.\n"
         "2. Set `status` to `in_progress` when you start, and keep `status_note` and `progress` current.\n"
         "3. Set `status` to `done` when the work is complete and verified.\n"
-        "4. Use `notify_user` only when the person must act or must know now."
+        "4. Use `notify_user` only when the person must act or must know now.\n"
+        "5. Use `ask_user` when a decision belongs to the person, and do not guess the answer."
     )
 
 
-def _split(value: Any) -> Any:
-    if isinstance(value, str):
-        return [part.strip() for part in value.split(",") if part.strip()]
-    return value
+def _split(value: object) -> object:
+    return split_commas(value) if isinstance(value, str) else value
 
 
-TaskId = Annotated[str, Field(description="The `id` of a task, for example from create_task or list_tasks.")]
+def _is_object(value: object) -> TypeIs[Mapping[str, object]]:
+    return isinstance(value, Mapping)
+
+
+TaskIdArg = Annotated[TaskId, Field(description="The `id` of a task, for example from create_task or list_tasks.")]
 StatusFilter = Annotated[
     list[Status] | None, BeforeValidator(_split), Field(description="Only tasks with one of these statuses.")
 ]
@@ -84,6 +96,8 @@ def _error(text: str) -> CallToolResult:
 def _explain(exc: AppError) -> str:
     """A message that tells the model how to correct the call."""
     if isinstance(exc, NotFound):
+        if exc.message.startswith("Question"):
+            return f"{exc.message} This API key sees only its own questions. Use the `id` that ask_user returned."
         return f"{exc.message} This API key sees only its own tasks. Call list_tasks to get the valid task IDs."
     if isinstance(exc, RateLimited):
         minutes = -(-exc.retry_after // 60)
@@ -109,15 +123,23 @@ def corrective[**P](
     return wrapper
 
 
-def _sent_arguments(ctx: Context) -> Mapping[str, Any]:
+def _sent_arguments(ctx: Context) -> Mapping[str, object]:
+    """The arguments as the client sent them. They show if a null was sent or if the argument was left out."""
     params = ctx.request_context.params or {}
-    arguments: Any = params.get("arguments")
-    return cast(Mapping[str, Any], arguments) if isinstance(arguments, Mapping) else {}
+    arguments: object = params.get("arguments")
+    return arguments if _is_object(arguments) else {}
+
+
+WaitArg = Annotated[
+    WaitSeconds,
+    Field(description="Seconds to hold the call for the answer, 0 to 50. With 0 the call returns at once."),
+]
 
 
 class Tools:
-    def __init__(self, tasks: TaskService) -> None:
+    def __init__(self, tasks: TaskService, questions: QuestionService) -> None:
         self._tasks = tasks
+        self._questions = questions
 
     @corrective
     async def create_task(
@@ -128,7 +150,7 @@ class Tools:
             Priority, Field(description="An `urgent` task alerts the person as time-sensitive.")
         ] = "medium",
         status: Annotated[Status, Field(description="Use `in_progress` if you start the work now.")] = "todo",
-        notify: Annotated[
+        notify: Annotated[  # noqa: FBT002  the SDK gives tool arguments by name
             bool,
             Field(description="If true, changes to this task alert the person. If false, the devices update silently."),
         ] = True,
@@ -154,14 +176,14 @@ class Tools:
         return _result(views.listing(page.tasks, page.next_cursor), out)
 
     @corrective
-    async def get_task(self, task_id: TaskId) -> Annotated[CallToolResult, TaskOut]:
+    async def get_task(self, task_id: TaskIdArg) -> Annotated[CallToolResult, TaskOut]:
         task = await self._tasks.get(current_principal(), task_id)
         return _result(views.detail(task), TaskOut.of(task))
 
     @corrective
-    async def update_task(
+    async def update_task(  # noqa: PLR0913  one argument for each tool argument of the contract
         self,
-        task_id: TaskId,
+        task_id: TaskIdArg,
         title: Annotated[Title | None, Field(description="New title.")] = None,
         description: Annotated[Description | None, Field(description="New details in Markdown.")] = None,
         status: Annotated[
@@ -183,7 +205,7 @@ class Tools:
         *,
         ctx: Context,
     ) -> Annotated[CallToolResult, TaskOut]:
-        given: dict[str, Any] = {
+        given: dict[str, object] = {
             "title": title,
             "description": description,
             "status": status,
@@ -203,7 +225,7 @@ class Tools:
         return _result(f"Updated task {views.line(task)}", TaskOut.of(task))
 
     @corrective
-    async def delete_task(self, task_id: TaskId) -> Annotated[CallToolResult, DeleteOut]:
+    async def delete_task(self, task_id: TaskIdArg) -> Annotated[CallToolResult, DeleteOut]:
         task = await self._tasks.delete(current_principal(), task_id)
         return _result(f'Deleted task {task.id} "{task.title}".', DeleteOut(deleted=True, task_id=task.id))
 
@@ -212,7 +234,7 @@ class Tools:
         self,
         title: Annotated[NotifyTitle, Field(description="Headline of the notification, 100 characters at most.")],
         body: Annotated[NotifyBody, Field(description="What the person must do or know, 1,000 characters at most.")],
-        task_id: Annotated[str | None, Field(description="The task that the notification is about.")] = None,
+        task_id: Annotated[TaskId | None, Field(description="The task that the notification is about.")] = None,
     ) -> Annotated[CallToolResult, NotifyResult]:
         result = await self._tasks.notify_user(
             current_principal(), NotifyInput(title=title, body=body, task_id=task_id)
@@ -222,6 +244,48 @@ class Tools:
             return _result(f"Notification sent to {devices}.", result)
         return _result("No notification was sent: the person has no device that can get notifications.", result)
 
+    @corrective
+    async def ask_user(
+        self,
+        prompt: Annotated[Prompt, Field(description="The question, one line, 300 characters at most.")],
+        kind: Annotated[
+            QuestionKind,
+            Field(description="`confirm` for Yes or No, `choice` for your own options, `text` for a typed answer."),
+        ] = "confirm",
+        options: Annotated[
+            list[Option] | None,
+            Field(description="Only for `choice`: 2 to 4 short labels, 30 characters at most each."),
+        ] = None,
+        task_id: Annotated[TaskId | None, Field(description="The task that the question is about.")] = None,
+        expires_in: Annotated[
+            int,
+            Field(
+                ge=limits.EXPIRES_IN_MIN,
+                le=limits.EXPIRES_IN_MAX,
+                description="Seconds until the question expires with no answer, 60 to 86,400.",
+            ),
+        ] = limits.EXPIRES_IN_DEFAULT,
+        wait_seconds: WaitArg = limits.MCP_WAIT_DEFAULT_SECONDS,
+    ) -> Annotated[CallToolResult, Question]:
+        principal = current_principal()
+        data = QuestionCreate(prompt=prompt, kind=kind, options=options, task_id=task_id, expires_in=expires_in)
+        question = await self._questions.ask(principal, data)
+        try:
+            question = await self._questions.get(principal, question.id, wait=wait_seconds)
+        except StoreUnavailable:
+            # The question is asked. A wait that cannot start must not look like a question that failed.
+            logger.warning("ask_user: the wait for an answer could not start")
+        return _result(views.question_summary(question), question)
+
+    @corrective
+    async def get_answer(
+        self,
+        question_id: Annotated[QuestionId, Field(description="The `id` of a question from ask_user.")],
+        wait_seconds: WaitArg = limits.MCP_WAIT_DEFAULT_SECONDS,
+    ) -> Annotated[CallToolResult, Question]:
+        question = await self._questions.get(current_principal(), question_id, wait=wait_seconds)
+        return _result(views.question_summary(question), question)
+
 
 class Resources:
     def __init__(self, tasks: TaskService) -> None:
@@ -229,11 +293,11 @@ class Resources:
 
     async def open_tasks(self) -> str:
         tasks = await self._tasks.open_tasks(current_principal())
-        return json.dumps({"tasks": [TaskOut.of(task).model_dump(mode="json") for task in tasks]})
+        return OpenTasksOut(tasks=[TaskOut.of(task) for task in tasks]).model_dump_json()
 
     async def task(self, task_id: str) -> str:
         try:
-            task = await self._tasks.get(current_principal(), task_id)
+            task = await self._tasks.get(current_principal(), TaskId(task_id))
         except NotFound as exc:
             raise ResourceNotFoundError(f"Task {task_id} was not found for this API key.") from exc
         return TaskOut.of(task).model_dump_json()
@@ -259,7 +323,7 @@ class Prompts:
     async def status_report(self) -> str:
         principal = current_principal()
         open_tasks = await self._tasks.open_tasks(principal)
-        closed = await self._tasks.page(principal, statuses=sorted(CLOSED_STATUSES), limit=20)
+        closed = await self._tasks.page(principal, statuses=CLOSED_STATUSES, limit=20)
         open_lines = "\n".join(views.line(task) for task in open_tasks) or "None."
         closed_lines = "\n".join(views.line(task) for task in closed.tasks) or "None."
         return (
@@ -276,30 +340,32 @@ class ClientRecorder:
     def __init__(self, keys: KeyService) -> None:
         self._keys = keys
 
-    async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
+    async def __call__(
+        self, ctx: ServerRequestContext[dict[str, object], object], call_next: CallNext
+    ) -> HandlerResult:
         principal = optional_principal()
         client = _client_info(ctx)
         if principal and client:
             try:
                 await self._keys.record_client(principal, *client)
             except Exception:
+                # The client name is not worth a failed request.
                 logger.warning("could not record the MCP client", exc_info=True)
         return await call_next(ctx)
 
 
-def _client_info(ctx: ServerRequestContext[Any, Any]) -> tuple[str, str] | None:
+def _client_info(ctx: ServerRequestContext[dict[str, object], object]) -> tuple[str, str] | None:
     """Client info from the request `_meta` (2026-07-28) or from `initialize` (earlier revisions)."""
     params = ctx.params or {}
-    raw: Any = None
+    info: object = None
     if ctx.method == "initialize":
-        raw = params.get("clientInfo")
+        info = params.get("clientInfo")
     else:
-        meta: Any = params.get("_meta")
-        if isinstance(meta, Mapping):
-            raw = cast(Mapping[str, Any], meta).get(CLIENT_INFO_META_KEY)
-    if not isinstance(raw, Mapping):
+        meta: object = params.get("_meta")
+        if _is_object(meta):
+            info = meta.get(CLIENT_INFO_META_KEY)
+    if not _is_object(info):
         return None
-    info = cast(Mapping[str, Any], raw)
     name, version = info.get("name"), info.get("version")
     if not isinstance(name, str) or not name:
         return None
@@ -332,33 +398,45 @@ def build_mcp_server(services: Services) -> MCPServer:
         subscriptions=False,
         middleware=[ClientRecorder(services.keys)],
     )
-    _add_tools(server, Tools(services.tasks))
+    _add_tools(server, Tools(services.tasks, services.questions), services.limits)
     _add_resources(server, Resources(services.tasks))
     _add_prompts(server, Prompts(services.tasks))
     return server
 
 
-_DESCRIPTIONS = {
-    "create_task": (
-        "Create a task that the person sees on their devices. Create one before you start a unit of work "
-        "that takes more than a few minutes. The result has the task `id` for later calls."
-    ),
-    "list_tasks": (
-        "List the tasks of this API key, newest update first. If `next_cursor` is not null, call again "
-        "with it as `cursor` to get the next page."
-    ),
-    "get_task": "Get one task with its full description.",
-    "update_task": (
-        "Change a task. Only the fields that you send change. Keep `progress` and `status_note` current while you work."
-    ),
-    "delete_task": (
-        "Delete a task permanently. To keep the task in the history, use update_task with status `cancelled` instead."
-    ),
-    "notify_user": (
-        "Send a push notification to the person's devices now. Use it only when the person must act or "
-        "must know now. A key can send 30 in one hour. Task changes already notify the person."
-    ),
-}
+def _descriptions(per_hour: int) -> dict[str, str]:
+    return {
+        "create_task": (
+            "Create a task that the person sees on their devices. Create one before you start a unit of work "
+            "that takes more than a few minutes. The result has the task `id` for later calls."
+        ),
+        "list_tasks": (
+            "List the tasks of this API key, newest update first. If `next_cursor` is not null, call again "
+            "with it as `cursor` to get the next page."
+        ),
+        "get_task": "Get one task with its full description.",
+        "update_task": (
+            "Change a task. Only the fields that you send change. "
+            "Keep `progress` and `status_note` current while you work."
+        ),
+        "delete_task": (
+            "Delete a task permanently. "
+            "To keep the task in the history, use update_task with status `cancelled` instead."
+        ),
+        "notify_user": (
+            "Send a push notification to the person's devices now. Use it only when the person must act or "
+            f"must know now. A key can send {per_hour} in one hour. Task changes already notify the person."
+        ),
+        "ask_user": (
+            "Ask the person a question and wait for the answer. Use it when a decision belongs to the person. "
+            "The call returns when the person answers, or after `wait_seconds`. If `status` is still `pending`, "
+            "call get_answer later or continue with other work. Do not guess the answer."
+        ),
+        "get_answer": (
+            "Get a question that you asked with ask_user, with its `status` and its `answer`. "
+            "For a pending question, the call waits up to `wait_seconds` for the answer."
+        ),
+    }
 
 
 def _hints(
@@ -373,21 +451,24 @@ def _hints(
     )
 
 
-def _add_tools(server: MCPServer, tools: Tools) -> None:
+def _add_tools(server: MCPServer, tools: Tools, limits: Limits) -> None:
+    descriptions = _descriptions(limits.notify_user_per_hour)
     # tools/list returns the tools in this order.
-    catalog: list[tuple[Callable[..., Any], ToolAnnotations]] = [
+    catalog: list[tuple[Callable[..., Awaitable[CallToolResult]], ToolAnnotations]] = [
         (tools.create_task, _hints("Create task")),
         (tools.list_tasks, _hints("List tasks", read_only=True, idempotent=True)),
         (tools.get_task, _hints("Get task", read_only=True, idempotent=True)),
         (tools.update_task, _hints("Update task", idempotent=True)),
         (tools.delete_task, _hints("Delete task", destructive=True, idempotent=True)),
         (tools.notify_user, _hints("Notify user")),
+        (tools.ask_user, _hints("Ask user")),
+        (tools.get_answer, _hints("Get answer", read_only=True, idempotent=True)),
     ]
     for tool, annotations in catalog:
         server.add_tool(
             tool,
             title=annotations.title,
-            description=_DESCRIPTIONS[tool.__name__],
+            description=descriptions[tool.__name__],
             annotations=annotations,
             structured_output=True,
         )

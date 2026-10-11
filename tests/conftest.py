@@ -1,34 +1,43 @@
-import asyncio
 import os
 import shutil
 import socket
 import subprocess
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
 import fakeredis
-import httpx
+import httpx2
 import pytest
-import uvicorn
+from cryptography import x509
 from fastapi import FastAPI
+from pydantic_settings import SettingsConfigDict
 from redis.asyncio import Redis
 
 from mcp_client_server.config import Settings
+from mcp_client_server.ids import AccountId
+from mcp_client_server.limits import Limits
 from mcp_client_server.main import create_app
-from mcp_client_server.push import PushRequest, PushResult
 from mcp_client_server.services import Services
 from mcp_client_server.store import Store
+from tests.support import Api, EventListener, FakeClock, RawStore, RecordingPushSender, Running, SequentialIds
 
-Connect = Callable[[], Redis]
-Headers = dict[str, str]
+type Connect = Callable[[], Redis]
+type Launch = Callable[..., AbstractAsyncContextManager[Running]]
 
 
-def _free_port() -> int:
+class TestSettings(Settings):
+    """Settings that read no `.env` file, so the tests do not depend on the developer's machine."""
+
+    __test__ = False
+    model_config = SettingsConfigDict(env_file=None)
+
+
+def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+        port: int = sock.getsockname()[1]
+        return port
 
 
 def _wait_for_port(port: int) -> None:
@@ -37,7 +46,7 @@ def _wait_for_port(port: int) -> None:
         with socket.socket() as sock:
             if sock.connect_ex(("127.0.0.1", port)) == 0:
                 return
-        time.sleep(0.05)
+        time.sleep(0.02)
     raise RuntimeError("the test store did not start")
 
 
@@ -62,8 +71,8 @@ def store_url() -> Iterator[str | None]:
     if not binary:
         yield None
         return
-    port = _free_port()
-    process = subprocess.Popen(
+    port = free_port()
+    process = subprocess.Popen(  # noqa: S603  the binary comes from PATH on the developer's machine
         [binary, "--port", str(port), "--bind", "127.0.0.1", "--save", "", "--appendonly", "no"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -83,20 +92,47 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def connect(store_url: str | None) -> Connect:
-    if store_url:
-        return lambda: Redis.from_url(store_url, decode_responses=True)
-    server = fakeredis.FakeServer()
-    return lambda: fakeredis.FakeAsyncRedis(server=server, decode_responses=True)
+def fake_server() -> fakeredis.FakeServer:
+    return fakeredis.FakeServer()
 
 
 @pytest.fixture
-async def redis(connect: Connect) -> AsyncIterator[Redis]:
+def connect(store_url: str | None, fake_server: fakeredis.FakeServer) -> Connect:
+    if store_url:
+        return lambda: Redis.from_url(store_url, decode_responses=True)  # pyright: ignore[reportUnknownMemberType]  redis-py has no types for from_url
+    return lambda: fakeredis.FakeAsyncRedis(server=fake_server, decode_responses=True)
+
+
+@pytest.fixture
+async def raw(connect: Connect) -> AsyncIterator[RawStore]:
+    """The test store, empty before and after the test."""
     client = connect()
-    await client.flushdb()
-    yield client
-    await client.flushdb()
+    store = RawStore(client)
+    await store.flush()
+    yield store
+    await store.flush()
     await client.aclose()
+
+
+@pytest.fixture
+def redis(raw: RawStore) -> Redis:
+    return raw.redis
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def push() -> RecordingPushSender:
+    return RecordingPushSender()
+
+
+@pytest.fixture
+def redis_listener(redis: Redis) -> EventListener:
+    """Collects the events of the first account that a test makes."""
+    return EventListener(redis, AccountId("acc_000001"))
 
 
 @pytest.fixture
@@ -104,35 +140,9 @@ def store(redis: Redis) -> Store:
     return Store(redis, "t")
 
 
-async def key_names(redis: Redis) -> set[str]:
-    return {str(name) for name in await redis.keys("t:*")}
-
-
-class FakePush:
-    def __init__(self) -> None:
-        self.sent: list[PushRequest] = []
-        self.dead: set[str] = set()
-
-    async def send(self, request: PushRequest) -> PushResult:
-        self.sent.append(request)
-        return PushResult(410, "Unregistered") if request.token in self.dead else PushResult(200)
-
-    async def aclose(self) -> None:
-        pass
-
-    def of_type(self, push_type: str) -> list[PushRequest]:
-        return [request for request in self.sent if request.push_type == push_type]
-
-
-@pytest.fixture
-def push() -> FakePush:
-    return FakePush()
-
-
 @pytest.fixture
 def settings(store_url: str | None) -> Settings:
-    return Settings(
-        _env_file=None,  # pyright: ignore[reportCallIssue]
+    return TestSettings(
         redis_url=store_url or "redis://unused:6379/0",
         redis_key_prefix="t",
         public_base_url="https://tasks.example.com",
@@ -143,89 +153,62 @@ def settings(store_url: str | None) -> Settings:
     )
 
 
-@asynccontextmanager
-async def running(application: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
-    """Run the lifespan of an app and give an HTTP client for it."""
-    async with AsyncExitStack() as stack:
-        await stack.enter_async_context(application.router.lifespan_context(application))
-        transport = httpx.ASGITransport(app=application)
-        yield await stack.enter_async_context(httpx.AsyncClient(transport=transport, base_url="http://test"))
+@pytest.fixture
+def launch(settings: Settings, redis: Redis, connect: Connect, clock: FakeClock, push: RecordingPushSender) -> Launch:
+    """Start an application on the test store. Keyword arguments replace fields of the settings or the limits."""
+
+    @asynccontextmanager
+    async def start(
+        *,
+        limits: Limits | None = None,
+        own_connections: bool = False,
+        attest_roots: Sequence[x509.Certificate] | None = None,
+        **changes: object,
+    ) -> AsyncGenerator[Running]:
+        app = create_app(
+            settings.model_copy(update=changes),
+            # With `own_connections`, the application makes its production pool and subscriber for the real store.
+            redis=None if own_connections else connect(),
+            event_redis=None if own_connections else connect(),
+            push_sender=push,
+            clock=clock,
+            ids=SequentialIds(),
+            limits=limits,
+            attest_roots=attest_roots,
+        )
+        services = app.state.services
+        assert isinstance(services, Services)
+        transport = httpx2.ASGITransport(app=app)
+        async with (
+            app.router.lifespan_context(app),
+            httpx2.AsyncClient(transport=transport, base_url="http://test") as http,
+        ):
+            yield Running(app, http, Api(http), services, push, clock)
+
+    return start
 
 
 @pytest.fixture
-async def app(settings: Settings, redis: Redis, connect: Connect, push: FakePush) -> AsyncIterator[FastAPI]:
-    application = create_app(settings, redis=connect(), event_redis=connect(), push_sender=push)
-    async with application.router.lifespan_context(application):
-        yield application
+async def running(launch: Launch) -> AsyncGenerator[Running]:
+    async with launch() as started:
+        yield started
 
 
 @pytest.fixture
-def services(app: FastAPI) -> Services:
-    return app.state.services
+def app(running: Running) -> FastAPI:
+    return running.app
 
 
 @pytest.fixture
-async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
-        yield http
+def client(running: Running) -> httpx2.AsyncClient:
+    return running.http
 
 
 @pytest.fixture
-async def live_url(app: FastAPI) -> AsyncIterator[str]:
-    """The app on a real socket. httpx.ASGITransport cannot stream, and the event stream needs that."""
-    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
-    server = uvicorn.Server(config)
-    task = asyncio.create_task(server.serve())
-    while not server.started:
-        await asyncio.sleep(0.01)
-    port = server.servers[0].sockets[0].getsockname()[1]
-    yield f"http://127.0.0.1:{port}"
-    server.should_exit = True
-    await task
-
-
-class Api:
-    """Short helpers for the REST calls that most tests need."""
-
-    def __init__(self, http: httpx.AsyncClient) -> None:
-        self.http = http
-
-    async def account(self) -> Headers:
-        response = await self.http.post("/v1/accounts", json={})
-        assert response.status_code == 201, response.text
-        return {"Authorization": f"Bearer {response.json()['token']}"}
-
-    async def key(self, account: Headers, label: str = "Claude Code") -> tuple[Headers, dict[str, Any]]:
-        response = await self.http.post("/v1/keys", json={"label": label}, headers=account)
-        assert response.status_code == 201, response.text
-        body = response.json()
-        return {"Authorization": f"Bearer {body['secret']}"}, body["key"]
-
-    async def task(self, auth: Headers, **fields: Any) -> dict[str, Any]:
-        response = await self.http.post("/v1/tasks", json={"title": "Write tests", **fields}, headers=auth)
-        assert response.status_code == 201, response.text
-        return response.json()
-
-    async def device(self, account: Headers, device_id: str, **fields: Any) -> dict[str, Any]:
-        body = {
-            "platform": "ios",
-            "model": "iPhone18,1",
-            "os_version": "27.0",
-            "app_version": "1.0 (1)",
-            "apns_environment": "production",
-            "apns_token": "a1b2c3d4" * 8,
-            "push_to_start_token": "c3d4e5f6" * 8,
-            **fields,
-        }
-        response = await self.http.put(f"/v1/devices/{device_id}", json=body, headers=account)
-        assert response.status_code == 200, response.text
-        return response.json()
+def api(running: Running) -> Api:
+    return running.api
 
 
 @pytest.fixture
-def api(client: httpx.AsyncClient) -> Api:
-    return Api(client)
-
-
-DEVICE_A = "dev_11111111-1111-4111-8111-111111111111"
-DEVICE_B = "dev_22222222-2222-4222-8222-222222222222"
+def services(running: Running) -> Services:
+    return running.services

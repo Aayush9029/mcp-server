@@ -1,16 +1,19 @@
 import logging
-from typing import Any
+from collections.abc import Mapping
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, TypeAdapter
 from starlette.exceptions import HTTPException
 
-from mcp_client_server.errors import AppError, RateLimited, Unauthorized, ValidationFailed
+from mcp_client_server.errors import AppError, ErrorCode, RateLimited, StoreUnavailable, Unauthorized, ValidationFailed
+from mcp_client_server.models import ErrorBody, ErrorResponse
 
 logger = logging.getLogger(__name__)
 
-_HTTP_CODES = {
+_SERVER_ERROR = 500
+_HTTP_CODES: dict[int, ErrorCode] = {
     400: "bad_request",
     401: "unauthorized",
     403: "forbidden",
@@ -19,52 +22,70 @@ _HTTP_CODES = {
     409: "conflict",
     422: "validation_failed",
     429: "rate_limited",
+    503: "unavailable",
 }
 _HTTP_MESSAGES = {404: "Not found.", 405: "Method not allowed."}
 _REQUEST_PARTS = {"body", "query", "path", "header", "cookie"}
 
 
 def error_response(
-    status: int, code: str, message: str, *, fields: dict[str, str] | None = None, headers: dict[str, str] | None = None
+    status: int,
+    code: ErrorCode,
+    message: str,
+    *,
+    fields: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
-    error: dict[str, Any] = {"code": code, "message": message}
-    if fields is not None:
-        error["fields"] = fields
-    return JSONResponse({"error": error}, status_code=status, headers=headers)
+    body = ErrorResponse(error=ErrorBody(code=code, message=message, fields=fields))
+    return JSONResponse(body.model_dump(exclude_none=True), status_code=status, headers=headers)
 
 
 async def _app_error(_: Request, exc: Exception) -> JSONResponse:
-    assert isinstance(exc, AppError)
+    if not isinstance(exc, AppError):
+        raise exc
     headers: dict[str, str] = {}
-    if isinstance(exc, RateLimited):
+    if isinstance(exc, (RateLimited, StoreUnavailable)):
         headers["Retry-After"] = str(exc.retry_after)
     if isinstance(exc, Unauthorized):
         headers["WWW-Authenticate"] = "Bearer"
+    if isinstance(exc, StoreUnavailable):
+        logger.warning("the store does not answer (%s)", type(exc.__cause__ or exc).__name__)
     fields = exc.fields if isinstance(exc, ValidationFailed) else None
     return error_response(exc.status, exc.code, exc.message, fields=fields, headers=headers)
 
 
-def _field_name(loc: tuple[Any, ...]) -> str:
-    parts = [str(part) for part in loc]
-    if len(parts) > 1 and parts[0] in _REQUEST_PARTS:
-        parts = parts[1:]
-    return ".".join(parts)
+class _Problem(BaseModel):
+    type: str
+    loc: tuple[int | str, ...]
+    msg: str
+
+    @property
+    def field(self) -> str:
+        parts = [str(part) for part in self.loc]
+        if len(parts) > 1 and parts[0] in _REQUEST_PARTS:
+            parts = parts[1:]
+        return ".".join(parts)
+
+
+_PROBLEMS = TypeAdapter(list[_Problem])
 
 
 async def _request_validation(_: Request, exc: Exception) -> JSONResponse:
-    assert isinstance(exc, RequestValidationError)
-    errors = exc.errors()
-    if any(error["type"] == "json_invalid" for error in errors):
+    if not isinstance(exc, RequestValidationError):
+        raise exc
+    problems = _PROBLEMS.validate_python(exc.errors())
+    if any(problem.type == "json_invalid" for problem in problems):
         return error_response(400, "bad_request", "The body is not valid JSON.")
-    fields = {_field_name(error["loc"]): str(error["msg"]).removeprefix("Value error, ") for error in errors}
+    fields = {problem.field: problem.msg.removeprefix("Value error, ") for problem in problems}
     return error_response(422, "validation_failed", "The request is not valid.", fields=fields)
 
 
 async def _http_error(_: Request, exc: Exception) -> JSONResponse:
-    assert isinstance(exc, HTTPException)
-    code = _HTTP_CODES.get(exc.status_code, "bad_request" if exc.status_code < 500 else "internal")
+    if not isinstance(exc, HTTPException):
+        raise exc
+    code = _HTTP_CODES.get(exc.status_code, "bad_request" if exc.status_code < _SERVER_ERROR else "internal")
     message = _HTTP_MESSAGES.get(exc.status_code, str(exc.detail))
-    return error_response(exc.status_code, code, message, headers=dict(exc.headers or {}))
+    return error_response(exc.status_code, code, message, headers=exc.headers)
 
 
 async def _unexpected(_: Request, exc: Exception) -> JSONResponse:

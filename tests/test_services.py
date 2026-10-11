@@ -1,239 +1,251 @@
-from typing import Any
+"""Service rules that need a clock, a limit, or a store that misbehaves."""
+
+import asyncio
+from typing import Literal, override
 
 import pytest
+from redis.asyncio import Redis
 
-from mcp_client_server import limits
-from mcp_client_server.credentials import Principal, hash_secret, new_secret
-from mcp_client_server.errors import (
-    Forbidden,
-    LimitReached,
-    NotFound,
-    RateLimited,
-    Unauthorized,
-    ValidationFailed,
-)
-from mcp_client_server.ids import new_id
-from mcp_client_server.models import KeyCreate, NotifyInput, Task, TaskCreate, TaskPatch
-from mcp_client_server.services import Services, tasks
-from mcp_client_server.services.tasks import apply_patch, decode_cursor, encode_cursor
-from mcp_client_server.store import Cursor
-from tests.conftest import FakePush
+from mcp_client_server.credentials import AccountPrincipal, AgentPrincipal, Secret, hash_secret
+from mcp_client_server.errors import Conflict, NotFound, RateLimited, Unauthorized
+from mcp_client_server.events import EventHub
+from mcp_client_server.ids import AccountId, KeyId
+from mcp_client_server.limits import Limits
+from mcp_client_server.models import Account, Key, KeyCreate, NotifyInput, Priority, Task, TaskCreate, TaskPatch
+from mcp_client_server.push import PushDispatcher
+from mcp_client_server.services import Services
+from mcp_client_server.services.questions import QuestionService
+from mcp_client_server.services.tasks import TaskService
+from mcp_client_server.store import Store, StoredTask
+from tests.conftest import Launch
+from tests.support import EventListener, FakeBus, FakeClock, RecordingPushSender, Running, SequentialIds
+
+DAY = 24 * 3600
 
 
-async def agent(services: Services, label: str = "Agent") -> tuple[Principal, Principal]:
+async def new_agent(services: Services, label: str = "Agent") -> tuple[AccountPrincipal, AgentPrincipal]:
     created = await services.accounts.create()
-    account = Principal(created.account.id)
+    account = AccountPrincipal(created.account.id)
     key = await services.keys.create(account, KeyCreate(label=label))
-    return account, Principal(account.account_id, key.key.id)
+    return account, AgentPrincipal(account.account_id, key.key.id)
 
 
-def task(**fields: Any) -> Task:
-    base: dict[str, Any] = {
-        "id": "tsk_1",
-        "key_id": "key_1",
-        "title": "Task",
-        "description": "",
-        "status": "in_progress",
-        "priority": "medium",
-        "notify": True,
-        "progress": 40,
-        "status_note": "Working",
-        "source": "agent",
-        "created_at": 100.0,
-        "updated_at": 100.0,
-        "completed_at": None,
-    }
-    return Task(**{**base, **fields})
+@pytest.mark.parametrize("secret", [None, "", "nope", "mck_" + "a" * 43, "sk_" + "a" * 43, "mck_" + "a" * 500])
+async def test_a_malformed_or_unknown_secret_is_unauthorized(services: Services, secret: str | None) -> None:
+    with pytest.raises(Unauthorized):
+        await services.auth.authenticate(Secret(secret) if secret is not None else None)
 
 
-def test_ids_sort_by_time_and_secrets_are_long() -> None:
-    first, second = new_id("tsk"), new_id("tsk")
-    assert first.startswith("tsk_") and len(first) == 30
-    assert first != second
-    secret = new_secret("mck_")
-    assert len(secret) == 47 and secret.isascii() and secret[4:].isalnum()
-    assert len(hash_secret(secret)) == 64
+async def test_credential_rate_limit_is_for_one_minute_and_one_credential(launch: Launch) -> None:
+    async with launch(rate_limit_per_minute=2) as running:
+        clock, auth = running.clock, running.services.auth
+        clock.time = 1_760_000_000.0 - (1_760_000_000.0 % 60) + 10
+        created = await running.services.accounts.create()
+        other = await running.services.accounts.create()
+
+        await auth.authenticate(created.token)
+        await auth.authenticate(created.token)
+        with pytest.raises(RateLimited) as limited:
+            await auth.authenticate(created.token)
+        assert 45 <= limited.value.retry_after <= 50
+        await auth.authenticate(other.token)
+
+        clock.advance(limited.value.retry_after)
+        assert await auth.authenticate(created.token) == AccountPrincipal(created.account.id)
 
 
-def test_patch_done_sets_progress_and_completed_at() -> None:
-    patched, changed = apply_patch(task(), {"status": "done", "progress": 50}, 200.0)
-    assert (patched.status, patched.progress, patched.completed_at, patched.updated_at) == ("done", 100, 200.0, 200.0)
-    assert changed == {"status", "progress"}
+async def test_account_creation_limit_is_for_one_hour_and_one_address(launch: Launch) -> None:
+    async with launch(rate_limit_accounts_per_hour=1) as running:
+        auth = running.services.auth
+        await auth.limit_account_creation("198.51.100.4")
+        with pytest.raises(RateLimited) as limited:
+            await auth.limit_account_creation("198.51.100.4")
+        assert 0 < limited.value.retry_after <= 3600
+        await auth.limit_account_creation("198.51.100.5")
+
+        running.clock.advance(limited.value.retry_after)
+        await auth.limit_account_creation("198.51.100.4")
 
 
-def test_patch_away_from_done_clears_completed_at() -> None:
-    done = task(status="done", progress=100, completed_at=150.0)
-    patched, changed = apply_patch(done, {"status": "in_progress"}, 200.0)
-    assert (patched.status, patched.completed_at, patched.progress) == ("in_progress", None, 100)
-    assert changed == {"status"}
-    kept, _ = apply_patch(done, {"title": "New"}, 200.0)
-    assert kept.completed_at == 150.0
+async def test_priority_filter_continues_with_a_cursor_when_the_scan_budget_ends(launch: Launch) -> None:
+    async with launch(limits=Limits(filter_scan_budget=4)) as running:
+        tasks = running.services.tasks
+        _, key = await new_agent(running.services)
+        urgent: list[str] = []
+        for number in range(12):
+            priority: Priority = "urgent" if number % 4 == 0 else "low"
+            made = await tasks.create(key, TaskCreate(title=f"T{number}", priority=priority))
+            if priority == "urgent":
+                urgent.append(made.id)
+
+        found: list[str] = []
+        sizes: list[int] = []
+        cursor: str | None = None
+        while True:
+            page = await tasks.page(key, priorities=["urgent"], limit=2, cursor=cursor)
+            found += [item.id for item in page.tasks]
+            sizes.append(len(page.docs))
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        assert found == list(reversed(urgent))
+        # The budget ends a page early: a page can be short, or empty, and still have a cursor.
+        assert len(sizes) > 2
+        assert min(sizes[:-1]) < 2
 
 
-def test_patch_null_and_empty_clear_the_optional_fields() -> None:
-    patched, changed = apply_patch(task(), {"progress": None, "status_note": ""}, 200.0)
-    assert (patched.progress, patched.status_note) == (None, None)
-    assert changed == {"progress", "status_note"}
-
-
-def test_patch_with_no_change_keeps_the_task() -> None:
-    original = task()
-    patched, changed = apply_patch(original, {"title": "Task", "progress": 40}, 200.0)
-    assert patched is original
-    assert changed == frozenset()
-
-
-def test_patch_keeps_updated_at_increasing() -> None:
-    patched, _ = apply_patch(task(updated_at=500.0), {"title": "New"}, 400.0)
-    assert patched.updated_at == 500.000001
-
-
-def test_cursor_round_trip_and_rejects_garbage() -> None:
-    cursor = Cursor(1760112000.412345, "tsk_01abc")
-    assert decode_cursor(encode_cursor(cursor)) == cursor
-    assert decode_cursor(None) is None
-    for bad in ("x", "!!!", "dGVzdA"):
-        with pytest.raises(ValidationFailed) as error:
-            decode_cursor(bad)
-        assert "cursor" in error.value.fields
-
-
-async def test_authenticate_rejects_malformed_and_unknown_secrets(services: Services) -> None:
-    for secret in (None, "", "nope", "mck_" + "a" * 43, "sk_" + "a" * 43, "mck_" + "a" * 500):
-        with pytest.raises(Unauthorized):
-            await services.auth.authenticate(secret)
-
-
-async def test_task_isolation_between_keys_and_accounts(services: Services) -> None:
-    account_a, key_a = await agent(services)
-    other_key = await services.keys.create(account_a, KeyCreate(label="Second"))
-    key_a2 = Principal(account_a.account_id, other_key.key.id)
-    account_b, key_b = await agent(services)
-    made = await services.tasks.create(key_a, TaskCreate(title="Secret plan"))
-
-    assert (await services.tasks.get(key_a, made.id)).id == made.id
-    assert (await services.tasks.get(account_a, made.id)).id == made.id
-    for stranger in (key_a2, key_b, account_b):
-        with pytest.raises(NotFound):
-            await services.tasks.get(stranger, made.id)
-        with pytest.raises(NotFound):
-            await services.tasks.update(stranger, made.id, TaskPatch(title="Mine now"))
-        with pytest.raises(NotFound):
-            await services.tasks.delete(stranger, made.id)
-        assert (await services.tasks.page(stranger)).tasks == []
-    with pytest.raises(NotFound):
-        await services.tasks.page(account_b, key_id=key_a.key_id)
-    with pytest.raises(NotFound):
-        await services.tasks.create(account_b, TaskCreate(title="Intrusion", key_id=key_a.key_id))
-    assert (await services.tasks.get(key_a, made.id)).title == "Secret plan"
-
-
-async def test_key_id_rules_for_each_credential_type(services: Services) -> None:
-    account, key = await agent(services)
-    with pytest.raises(ValidationFailed) as error:
-        await services.tasks.create(key, TaskCreate(title="T", key_id=key.key_id))
-    assert "key_id" in error.value.fields
-    with pytest.raises(ValidationFailed):
-        await services.tasks.create(account, TaskCreate(title="T"))
-    with pytest.raises(ValidationFailed):
-        await services.tasks.page(key, key_id=key.key_id)
-    made = await services.tasks.create(account, TaskCreate(title="T", key_id=key.key_id))
-    assert (made.source, made.key_id) == ("app", key.key_id)
-    assert (await services.tasks.create(key, TaskCreate(title="T"))).source == "agent"
-
-
-async def test_open_task_limit_gives_a_limit_error(services: Services, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(limits, "MAX_OPEN_TASKS_PER_KEY", 2)
-    _, key = await agent(services)
-    await services.tasks.create(key, TaskCreate(title="One"))
-    await services.tasks.create(key, TaskCreate(title="Two"))
-    with pytest.raises(LimitReached):
-        await services.tasks.create(key, TaskCreate(title="Three"))
-    closed = await services.tasks.create(key, TaskCreate(title="Done", status="done"))
-    with pytest.raises(LimitReached):
-        await services.tasks.update(key, closed.id, TaskPatch(status="todo"))
-
-
-async def test_priority_filter_pages_within_the_scan_budget(
-    services: Services, monkeypatch: pytest.MonkeyPatch
+async def test_a_closed_task_expires_90_days_after_its_last_update(
+    running: Running, redis: Redis, store: Store
 ) -> None:
-    monkeypatch.setattr(tasks, "_SCAN_BUDGET", 4)
-    _, key = await agent(services)
-    urgent: list[str] = []
-    for number in range(12):
-        priority = "urgent" if number % 4 == 0 else "low"
-        made = await services.tasks.create(key, TaskCreate(title=f"T{number}", priority=priority))
-        if priority == "urgent":
-            urgent.append(made.id)
-
-    found: list[str] = []
-    cursor: str | None = None
-    pages = 0
-    while True:
-        page = await services.tasks.page(key, priorities=["urgent"], limit=2, cursor=cursor)
-        found += [item.id for item in page.tasks]
-        pages += 1
-        cursor = page.next_cursor
-        if cursor is None:
-            break
-    assert found == list(reversed(urgent))
-    assert pages > 2
-
-
-async def test_expiry_deletes_only_old_closed_tasks(services: Services, monkeypatch: pytest.MonkeyPatch) -> None:
-    account, key = await agent(services)
+    services, clock = running.services, running.clock
+    # This test does the work of the maintenance loop itself, so it takes the lock of the loop.
+    assert await store.acquire_lock("expire", 600)
+    account, key = await new_agent(services)
     open_task = await services.tasks.create(key, TaskCreate(title="Open"))
     done = await services.tasks.create(key, TaskCreate(title="Done", status="done"))
-    assert await services.maintenance.expire_closed_tasks() == 0
+    cancelled = await services.tasks.create(key, TaskCreate(title="Cancelled", status="cancelled"))
 
-    monkeypatch.setattr(limits, "CLOSED_TASK_TTL_SECONDS", -60)
+    clock.advance(89 * DAY)
+    assert await services.maintenance.expire_closed_tasks() == 0
+    # An update starts the 90 days again.
+    await services.tasks.update(key, cancelled.id, TaskPatch(title="Still here"))
+
+    clock.advance(2 * DAY)
+    listener = EventListener(redis, account.account_id)
+    await listener.start()
     assert await services.maintenance.expire_closed_tasks() == 1
-    assert [item.id for item in (await services.tasks.page(account)).tasks] == [open_task.id]
+    assert await listener.names() == ["task.deleted"]
+
+    assert {item.id for item in (await services.tasks.page(account)).tasks} == {open_task.id, cancelled.id}
     with pytest.raises(NotFound):
         await services.tasks.get(key, done.id)
     counts = (await services.keys.all(account))[0].counts
-    assert (counts.todo, counts.done) == (1, 0)
+    assert (counts.todo, counts.done, counts.cancelled) == (1, 0, 1)
     assert await services.maintenance.expire_closed_tasks() == 0
 
 
-async def test_last_client_is_written_once_for_an_unchanged_client(
-    services: Services, monkeypatch: pytest.MonkeyPatch
+async def test_a_task_that_was_opened_again_does_not_expire(running: Running) -> None:
+    services, clock = running.services, running.clock
+    _, key = await new_agent(services)
+    task = await services.tasks.create(key, TaskCreate(title="Back", status="done"))
+    await services.tasks.update(key, task.id, TaskPatch(status="todo"))
+
+    clock.advance(200 * DAY)
+    assert await services.maintenance.expire_closed_tasks() == 0
+    assert (await services.tasks.get(key, task.id)).status == "todo"
+
+
+async def test_the_maintenance_loop_expires_tasks_and_one_worker_has_the_lock(running: Running) -> None:
+    services, clock = running.services, running.clock
+    _, key = await new_agent(services)
+    task = await services.tasks.create(key, TaskCreate(title="Old", status="done"))
+    clock.advance(91 * DAY)
+
+    loop = asyncio.create_task(services.maintenance.run())
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                try:
+                    await services.tasks.get(key, task.id)
+                except NotFound:
+                    break
+                await asyncio.sleep(0)
+    finally:
+        loop.cancel()
+        await asyncio.gather(loop, return_exceptions=True)
+    # Each pass waits from half an interval to one interval. The 10 second sleeps are the question sweep.
+    assert all(450 <= seconds <= 900 for seconds in clock.sleeps if seconds != 10)
+
+
+class ConflictStore(Store):
+    """A store where a different writer always wins."""
+
+    @override
+    async def update_task(
+        self, account_id: AccountId, old: StoredTask, new: Task, event: str
+    ) -> Literal["ok", "conflict", "limit"]:
+        return "conflict"
+
+
+async def test_a_write_that_always_loses_the_race_ends_as_a_conflict(redis: Redis, clock: FakeClock) -> None:
+    store = ConflictStore(redis, "t")
+    push = PushDispatcher(store, None, None, clock)
+    ids, limits = SequentialIds(), Limits()
+    hub = EventHub(FakeBus(clock).connect, store.keys, clock)
+    tasks = TaskService(store, push, QuestionService(store, hub, push, clock, ids, limits), clock, ids, limits)
+    real = Store(redis, "t")
+    account_id, key_id = AccountId("acc_1"), KeyId("key_1")
+    await real.create_account(Account(id=account_id, created_at=1.0), hash_secret(Secret("mca_x")))
+    key = Key(id=key_id, label="Agent", prefix="mck_xxxx", last4="xxxx", created_at=1.0)
+    await real.create_key(account_id, key, hash_secret(Secret("mck_x")), "event: x\ndata: {}\n\n")
+    agent = AgentPrincipal(account_id, key_id)
+    task = await tasks.create(agent, TaskCreate(title="Contested"))
+
+    with pytest.raises(Conflict):
+        await tasks.update(agent, task.id, TaskPatch(title="Mine"))
+    assert (await tasks.get(agent, task.id)).title == "Contested"
+
+
+async def test_last_client_gives_one_event_for_each_change_and_one_write_each_minute(
+    running: Running, redis: Redis
 ) -> None:
-    account, key = await agent(services)
-    writes: list[str] = []
-    original = services.store.set_key_client
+    services, clock = running.services, running.clock
+    account, key = await new_agent(services)
+    listener = EventListener(redis, account.account_id)
+    await listener.start()
 
-    async def spy(account_id: str, key_id: str, client: Any) -> Any:
-        writes.append(client.name)
-        return await original(account_id, key_id, client)
-
-    monkeypatch.setattr(services.store, "set_key_client", spy)
     await services.keys.record_client(key, "claude-code", "2.1.290")
     await services.keys.record_client(key, "claude-code", "2.1.290")
-    await services.keys.record_client(account, "ignored", "1")
-    assert writes == ["claude-code"]
+    clock.advance(61)
+    await services.keys.record_client(key, "claude-code", "2.1.290")
     await services.keys.record_client(key, "cursor", "3.0")
-    assert writes == ["claude-code", "cursor"]
+    await services.keys.record_client(key, "", "1")
+    assert await listener.names() == ["key.updated", "key.updated"]
+
     client = (await services.keys.all(account))[0].last_client
     assert client is not None
     assert (client.name, client.version) == ("cursor", "3.0")
 
 
-async def test_notify_user_limit_and_scope(services: Services, push: FakePush, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(limits, "NOTIFY_USER_PER_HOUR", 2)
-    account, key = await agent(services)
-    _, stranger = await agent(services)
-    foreign = await services.tasks.create(stranger, TaskCreate(title="Foreign"))
-    message = NotifyInput(title="Review needed", body="Please look at the pull request.")
+async def test_a_second_worker_does_not_send_the_event_again_for_the_same_client(launch: Launch, redis: Redis) -> None:
+    async with launch() as first, launch() as second:
+        account, key = await new_agent(first.services)
+        listener = EventListener(redis, account.account_id)
+        await listener.start()
+        await first.services.keys.record_client(key, "claude-code", "2.1.290")
+        await second.services.keys.record_client(key, "claude-code", "2.1.290")
+        assert await listener.names() == ["key.updated"]
 
-    with pytest.raises(Forbidden):
-        await services.tasks.notify_user(account, message)
-    with pytest.raises(NotFound):
-        await services.tasks.notify_user(key, message.model_copy(update={"task_id": foreign.id}))
-    result = await services.tasks.notify_user(key, message)
-    assert (result.sent, result.devices) == (False, 0)
-    await services.tasks.notify_user(key, message)
-    with pytest.raises(RateLimited) as error:
+
+async def test_notify_user_limit_is_for_one_hour_and_one_key(launch: Launch, push: RecordingPushSender) -> None:
+    async with launch(limits=Limits(notify_user_per_hour=2)) as running:
+        services = running.services
+        account, key = await new_agent(services)
+        second = await services.keys.create(account, KeyCreate(label="Second"))
+        other_key = AgentPrincipal(account.account_id, second.key.id)
+        message = NotifyInput(title="Review needed", body="Please look at the pull request.")
+
+        first = await services.tasks.notify_user(key, message)
+        assert (first.sent, first.devices) == (False, 0)
         await services.tasks.notify_user(key, message)
-    assert 0 < error.value.retry_after <= 3600
-    assert push.sent == []
+        with pytest.raises(RateLimited) as limited:
+            await services.tasks.notify_user(key, message)
+        assert 0 < limited.value.retry_after <= 3600
+        await services.tasks.notify_user(other_key, message)
+
+        running.clock.advance(limited.value.retry_after)
+        await services.tasks.notify_user(key, message)
+        assert push.sent == []
+
+
+async def test_notify_user_about_a_task_of_a_different_key_is_not_found_and_not_counted(launch: Launch) -> None:
+    async with launch(limits=Limits(notify_user_per_hour=1)) as running:
+        services = running.services
+        _, key = await new_agent(services)
+        _, stranger = await new_agent(services)
+        foreign = await services.tasks.create(stranger, TaskCreate(title="Foreign"))
+        message = NotifyInput(title="Hi", body="There")
+
+        with pytest.raises(NotFound):
+            await services.tasks.notify_user(key, message.model_copy(update={"task_id": foreign.id}))
+        await services.tasks.notify_user(key, message)

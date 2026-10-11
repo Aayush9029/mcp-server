@@ -33,7 +33,7 @@ For a load test, start the server with `RATE_LIMIT_PER_MINUTE=0 RATE_LIMIT_ACCOU
 
 ## Rules
 
-- `docs/api.md` is the contract with the Apple clients. Change the contract and the code in the same commit. Do not change a REST shape, a push payload, or the Live Activity JSON without the matching app change.
+- The files in `docs/` are the contract with the Apple clients, and the website shows them. Change the contract and the code in the same commit. Do not change a REST shape, a push payload, or the Live Activity JSON without the matching app change.
 - Product strings come from settings such as `APP_NAME`. Do not hardcode the app name.
 - All configuration is environment variables, listed in `.env.example`. No secret goes in the repository.
 - A push to `main` deploys to production on Render. Run the tests, ruff, and pyright first.

@@ -9,6 +9,26 @@ _COMMON = """
 local p = ARGV[1]
 local STATUSES = {'todo', 'in_progress', 'done', 'cancelled'}
 local function is_open(s) return s == 'todo' or s == 'in_progress' end
+local QUESTION_STATUSES = {'pending', 'answered', 'expired', 'cancelled'}
+-- Deletes the questions of one key. `acck` is the account key, or false if the account indexes go away with it.
+local function drop_questions(keyk, acck)
+  for _, s in ipairs(QUESTION_STATUSES) do
+    local idx = keyk .. ':qst:' .. s
+    local ids = redis.call('ZRANGE', idx, 0, -1)
+    for i = 1, #ids, 500 do
+      local chunk, docs = {}, {}
+      for j = i, math.min(i + 499, #ids) do
+        chunk[#chunk + 1] = ids[j]
+        docs[#docs + 1] = p .. ':qst:' .. ids[j]
+      end
+      redis.call('DEL', unpack(docs))
+      redis.call('ZREM', p .. ':qexp', unpack(chunk))
+      redis.call('ZREM', p .. ':qclosed', unpack(chunk))
+      if acck then redis.call('ZREM', acck .. ':qst:' .. s, unpack(chunk)) end
+    end
+    redis.call('DEL', idx)
+  end
+end
 """
 
 AUTH = """
@@ -39,11 +59,16 @@ return n
 
 HASH_UPDATE = """
 -- KEYS[1] hash; ARGV: guard field, guard value, then field/value pairs
+-- Returns false if the guard fails, else {1 if a value changed else 0, the hash}.
 if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then return false end
-local pairs_ = {}
-for i = 3, #ARGV do pairs_[#pairs_ + 1] = ARGV[i] end
-redis.call('HSET', KEYS[1], unpack(pairs_))
-return redis.call('HGETALL', KEYS[1])
+local changed = 0
+for i = 3, #ARGV, 2 do
+  if redis.call('HGET', KEYS[1], ARGV[i]) ~= ARGV[i + 1] then
+    redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+    changed = 1
+  end
+end
+return {changed, redis.call('HGETALL', KEYS[1])}
 """
 
 HASH_CLEAR = """
@@ -85,7 +110,7 @@ if token ~= '' then
     local oa, od = string.match(holder, '^([^:]+):(.+)$')
     local other = p .. ':dev:' .. oa .. ':' .. od
     if redis.call('EXISTS', other) == 1 then
-      redis.call('HSET', other, 'apns_token', '', 'push_to_start_token', '')
+      redis.call('HSET', other, 'apns_token', '', 'push_to_start_token', '', 'widget_push_token', '')
     end
   end
   redis.call('SET', p .. ':tok:' .. token, owner)
@@ -105,7 +130,7 @@ local token = redis.call('HGET', devk, 'apns_token')
 if token and token ~= '' and redis.call('GET', p .. ':tok:' .. token) == aid .. ':' .. did then
   redis.call('DEL', p .. ':tok:' .. token)
 end
-redis.call('DEL', devk)
+redis.call('DEL', devk, p .. ':wdg:' .. aid .. ':' .. did, p .. ':wdgd:' .. aid .. ':' .. did)
 return 1
 """
 
@@ -148,12 +173,14 @@ for i = 1, #ids, 500 do
     end
     chunk[#chunk + 1] = id
     tkeys[#tkeys + 1] = p .. ':tsk:' .. id
+    tkeys[#tkeys + 1] = p .. ':tq:' .. id
   end
   redis.call('DEL', unpack(tkeys))
   redis.call('ZREM', p .. ':closed', unpack(chunk))
   redis.call('ZREM', acc_tasks, unpack(chunk))
   for _, s in ipairs(STATUSES) do redis.call('ZREM', acc_tasks .. ':' .. s, unpack(chunk)) end
 end
+drop_questions(keyk, p .. ':acc:' .. aid)
 redis.call('DEL', keyk, key_tasks, p .. ':touch:' .. kid, p .. ':cred:' .. h[2])
 for _, s in ipairs(STATUSES) do redis.call('DEL', key_tasks .. ':' .. s) end
 redis.call('ZREM', p .. ':acc:' .. aid .. ':keys', kid)
@@ -178,6 +205,7 @@ for i = 1, #ids, 500 do
     chunk[#chunk + 1] = ids[j]
     keys[#keys + 1] = p .. ':tsk:' .. ids[j]
     keys[#keys + 1] = p .. ':la:' .. ids[j]
+    keys[#keys + 1] = p .. ':tq:' .. ids[j]
   end
   redis.call('DEL', unpack(keys))
   redis.call('ZREM', p .. ':closed', unpack(chunk))
@@ -186,6 +214,7 @@ for _, kid in ipairs(redis.call('ZRANGE', acck .. ':keys', 0, -1)) do
   local keyk = p .. ':key:' .. kid
   local kc = redis.call('HGET', keyk, 'cred')
   if kc then redis.call('DEL', p .. ':cred:' .. kc) end
+  drop_questions(keyk, false)
   redis.call('DEL', keyk, keyk .. ':tasks', p .. ':touch:' .. kid)
   for _, s in ipairs(STATUSES) do redis.call('DEL', keyk .. ':tasks:' .. s) end
 end
@@ -195,10 +224,13 @@ for _, did in ipairs(redis.call('SMEMBERS', acck .. ':devices')) do
   if token and token ~= '' and redis.call('GET', p .. ':tok:' .. token) == aid .. ':' .. did then
     redis.call('DEL', p .. ':tok:' .. token)
   end
-  redis.call('DEL', devk)
+  redis.call('DEL', devk, p .. ':wdg:' .. aid .. ':' .. did, p .. ':wdgd:' .. aid .. ':' .. did)
 end
+local attested = redis.call('HGET', acck, 'attest_key_id')
+if attested then redis.call('DEL', p .. ':attk:' .. attested) end
 redis.call('DEL', acck, acck .. ':keys', acck .. ':devices', acc_tasks, p .. ':cred:' .. cred)
 for _, s in ipairs(STATUSES) do redis.call('DEL', acc_tasks .. ':' .. s) end
+for _, s in ipairs(QUESTION_STATUSES) do redis.call('DEL', acck .. ':qst:' .. s) end
 redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[3])
 return 1
 """
@@ -230,9 +262,12 @@ TASK_CREATE = (
 -- ARGV: prefix, account, key, task, json, status, score, open limit, event
 local aid, kid, tid, status = ARGV[2], ARGV[3], ARGV[4], ARGV[6]
 local keyk = p .. ':key:' .. kid
+local tk = p .. ':tsk:' .. tid
 if redis.call('HGET', keyk, 'account_id') ~= aid then return 'no_key' end
+-- The client sends a write again after a lost connection. The task is then there already.
+if redis.call('EXISTS', tk) == 1 then return 'ok' end
 if is_open(status) and open_count(keyk) >= tonumber(ARGV[8]) then return 'limit' end
-redis.call('SET', p .. ':tsk:' .. tid, ARGV[5])
+redis.call('SET', tk, ARGV[5])
 index(aid, kid, tid, status, ARGV[7])
 redis.call('HINCRBY', keyk, 'n:' .. status, 1)
 redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[9])
@@ -266,7 +301,7 @@ return 'ok'
 
 TASK_DELETE = """
 -- ARGV: prefix, account, key, task, json, status, event
--- Returns false on a concurrent write, else the Live Activity pairs that the task had.
+-- Returns false on a concurrent write, else {the Live Activity pairs, the pending question IDs} of the task.
 local p, aid, kid, tid, status = ARGV[1], ARGV[2], ARGV[3], ARGV[4], ARGV[6]
 local tk = p .. ':tsk:' .. tid
 if redis.call('GET', tk) ~= ARGV[5] then return false end
@@ -278,11 +313,12 @@ redis.call('ZREM', kt .. ':' .. status, tid)
 redis.call('ZREM', at .. ':' .. status, tid)
 redis.call('ZREM', p .. ':closed', tid)
 redis.call('HINCRBY', p .. ':key:' .. kid, 'n:' .. status, -1)
-local lak = p .. ':la:' .. tid
+local lak, tqk = p .. ':la:' .. tid, p .. ':tq:' .. tid
 local la = redis.call('HGETALL', lak)
-redis.call('DEL', lak)
+local questions = redis.call('ZRANGE', tqk, 0, -1)
+redis.call('DEL', lak, tqk)
 redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[7])
-return la
+return {la, questions}
 """
 
 TASK_PAGE = """
@@ -374,4 +410,103 @@ local p = ARGV[1]
 if not redis.call('ZSCORE', p .. ':acc:' .. ARGV[2] .. ':tasks', ARGV[3]) then return 0 end
 redis.call('HDEL', p .. ':la:' .. ARGV[3], ARGV[4])
 return 1
+"""
+
+ACCOUNT_CREATE = """
+-- ARGV: prefix, account, cred hash, created_at, live_activities, attested key id ('' = none), public key, counter
+-- One attested key makes one account.
+local p, aid, kid = ARGV[1], ARGV[2], ARGV[6]
+local fields = {'id', aid, 'created_at', ARGV[4], 'live_activities', ARGV[5], 'cred', ARGV[3]}
+if kid ~= '' then
+  if not redis.call('SET', p .. ':attk:' .. kid, aid, 'NX') then return 'key_used' end
+  for _, v in ipairs({'attest_key_id', kid, 'attest_public_key', ARGV[7], 'attest_counter', ARGV[8]}) do
+    fields[#fields + 1] = v
+  end
+end
+redis.call('HSET', p .. ':acc:' .. aid, unpack(fields))
+redis.call('SET', p .. ':cred:' .. ARGV[3], 'a:' .. aid)
+return 'ok'
+"""
+
+QUESTION_CREATE = """
+-- ARGV: prefix, account, key, question, json, created_at, expires_at, pending limit, task ('' = none), event
+local p, aid, kid, qid, tid = ARGV[1], ARGV[2], ARGV[3], ARGV[4], ARGV[9]
+local keyk = p .. ':key:' .. kid
+local qk = p .. ':qst:' .. qid
+if redis.call('HGET', keyk, 'account_id') ~= aid then return 'no_key' end
+-- The client sends a write again after a lost connection. The question is then there already.
+if redis.call('EXISTS', qk) == 1 then return 'ok' end
+if tid ~= '' and not redis.call('ZSCORE', keyk .. ':tasks', tid) then return 'no_task' end
+if redis.call('ZCARD', keyk .. ':qst:pending') >= tonumber(ARGV[8]) then return 'limit' end
+redis.call('SET', qk, ARGV[5])
+redis.call('ZADD', keyk .. ':qst:pending', ARGV[6], qid)
+redis.call('ZADD', p .. ':acc:' .. aid .. ':qst:pending', ARGV[6], qid)
+redis.call('ZADD', p .. ':qexp', ARGV[7], qid)
+if tid ~= '' then redis.call('ZADD', p .. ':tq:' .. tid, ARGV[6], qid) end
+redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[10])
+return 'ok'
+"""
+
+QUESTION_CLOSE = """
+-- ARGV: prefix, account, key, question, old json, new json, new status, created_at, closed at, task ('' = none), event
+-- A question leaves `pending` one time. The old json is the guard: the second writer gets 'conflict'.
+local p, aid, kid, qid, status, tid = ARGV[1], ARGV[2], ARGV[3], ARGV[4], ARGV[7], ARGV[10]
+local qk = p .. ':qst:' .. qid
+if redis.call('GET', qk) ~= ARGV[5] then return 'conflict' end
+local kq, aq = p .. ':key:' .. kid .. ':qst:', p .. ':acc:' .. aid .. ':qst:'
+redis.call('SET', qk, ARGV[6])
+redis.call('ZREM', kq .. 'pending', qid)
+redis.call('ZREM', aq .. 'pending', qid)
+redis.call('ZADD', kq .. status, ARGV[8], qid)
+redis.call('ZADD', aq .. status, ARGV[8], qid)
+redis.call('ZREM', p .. ':qexp', qid)
+redis.call('ZADD', p .. ':qclosed', ARGV[9], qid)
+if tid ~= '' then redis.call('ZREM', p .. ':tq:' .. tid, qid) end
+redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[11])
+return 'ok'
+"""
+
+QUESTION_PURGE = """
+-- ARGV: prefix, account, key, question, status
+local p, qid = ARGV[1], ARGV[4]
+redis.call('DEL', p .. ':qst:' .. qid)
+redis.call('ZREM', p .. ':key:' .. ARGV[3] .. ':qst:' .. ARGV[5], qid)
+redis.call('ZREM', p .. ':acc:' .. ARGV[2] .. ':qst:' .. ARGV[5], qid)
+redis.call('ZREM', p .. ':qclosed', qid)
+redis.call('ZREM', p .. ':qexp', qid)
+return 1
+"""
+
+QUESTION_LIST = """
+-- ARGV: index prefix (ends with ':qst:'), question key prefix, count, statuses...
+-- Returns the json of the newest questions with one of the statuses, newest first.
+local base, qprefix, count = ARGV[1], ARGV[2], tonumber(ARGV[3])
+local found = {}
+for i = 4, #ARGV do
+  local page = redis.call('ZREVRANGE', base .. ARGV[i], 0, count - 1, 'WITHSCORES')
+  for j = 1, #page, 2 do found[#found + 1] = {page[j], tonumber(page[j + 1])} end
+end
+table.sort(found, function(a, b)
+  if a[2] ~= b[2] then return a[2] > b[2] end
+  return a[1] > b[1]
+end)
+local keys = {}
+for i = 1, math.min(#found, count) do keys[i] = qprefix .. found[i][1] end
+if #keys == 0 then return {} end
+local out = {}
+for _, doc in ipairs(redis.call('MGET', unpack(keys))) do
+  if doc then out[#out + 1] = doc end
+end
+return out
+"""
+
+WIDGET_SLOT = """
+-- KEYS[1] throttle, KEYS[2] dirty mark; ARGV: seconds
+-- Returns 1 if a push can go now. Else it marks that one more push is necessary when the throttle ends.
+if redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[1]) then
+  redis.call('DEL', KEYS[2])
+  return 1
+end
+redis.call('SET', KEYS[2], '1', 'EX', ARGV[1] * 4)
+return 0
 """

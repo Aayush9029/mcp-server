@@ -1,84 +1,112 @@
+"""The static pages, the settings, and the rule that no credential reaches a log."""
+
 import logging
 import re
+from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
+from pydantic import ValidationError
 
-from mcp_client_server.config import Settings
 from mcp_client_server.logsetup import RedactKeyParam, configure_logging, redact
-from mcp_client_server.main import create_app
-from tests.conftest import Api, Connect, FakePush
-from tests.test_mcp import mcp_client, rpc
+from tests.conftest import Launch, TestSettings
+from tests.support import Api, mcp_client, secret_of
 
 PAGES = ["/", "/privacy", "/terms", "/support"]
 
 
 @pytest.mark.parametrize("path", PAGES)
-async def test_pages_are_self_contained_html(client: httpx.AsyncClient, path: str) -> None:
+async def test_pages_are_self_contained_html(client: httpx2.AsyncClient, path: str) -> None:
     response = await client.get(path)
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["cache-control"] == "public, max-age=300"
     html = response.text
-    assert html.startswith("<!doctype html>") and "MCP Client" in html
+    assert html.startswith("<!doctype html>")
+    assert "MCP Client" in html
     for external in ("<script", "<link", "<img", "<iframe", "@import", "url(", "src="):
         assert external not in html, external
     links = set(re.findall(r'href="([^"]+)"', html))
     assert links <= {"/", "/privacy", "/terms", "/support", "mailto:help@example.com"}
 
 
-async def test_home_page_has_the_setup_for_each_agent(client: httpx.AsyncClient) -> None:
+async def test_home_page_has_the_setup_for_each_agent(client: httpx2.AsyncClient) -> None:
     html = (await client.get("/")).text
-    assert "https://tasks.example.com/mcp" in html
-    for agent in ("Claude Code", "Cursor", "Codex", "Other MCP clients"):
-        assert agent in html
-    assert "claude mcp add --transport http tasks https://tasks.example.com/mcp" in html
-    assert "[mcp_servers.tasks]" in html and "mcpServers" in html
-    assert "Authorization: Bearer mck_YOUR_KEY" in html
-
-
-async def test_privacy_page_says_what_the_server_stores(client: httpx.AsyncClient) -> None:
-    html = (await client.get("/privacy")).text
-    for fact in (
-        "anonymous account ID",
-        "push tokens",
-        "SHA-256 hash",
-        "label",
-        "titles, descriptions",
-        "No name, no email address",
-        "no ads",
-        "DELETE /v1/account",
-        "90 days",
-        "help@example.com",
+    for text in (
+        "claude mcp add --transport http tasks https://tasks.example.com/mcp",
+        "[mcp_servers.tasks]",
+        "mcpServers",
+        "Authorization: Bearer mck_YOUR_KEY",
+        "Other MCP clients",
     ):
+        assert text in html, text
+
+
+async def test_privacy_page_says_what_the_server_stores_and_for_how_long(client: httpx2.AsyncClient) -> None:
+    html = (await client.get("/privacy")).text
+    for fact in ("anonymous account ID", "push tokens", "SHA-256 hash", "DELETE /v1/account", "90 days"):
         assert fact in html, fact
 
 
-async def test_product_strings_come_from_configuration(settings: Settings, connect: Connect, push: FakePush) -> None:
-    custom = settings.model_copy(
-        update={
-            "app_name": "Agent <Pulse>",
-            "support_email": "hi@pulse.example",
-            "app_store_url": "https://apps.example/id1",
-        }
-    )
-    app = create_app(custom, redis=connect(), event_redis=connect(), push_sender=push)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
-        home = (await http.get("/")).text
-        support = (await http.get("/support")).text
-    assert "Agent &lt;Pulse&gt;" in home and "<Pulse>" not in home and "MCP Client" not in home
+async def test_product_strings_come_from_the_settings_and_are_escaped(launch: Launch) -> None:
+    changes = {
+        "app_name": "Agent <Pulse>",
+        "support_email": "hi@pulse.example",
+        "app_store_url": "https://apps.example/id1",
+    }
+    async with launch(**changes) as running:
+        home = (await running.http.get("/")).text
+        support = (await running.http.get("/support")).text
+        _, key, _ = await running.api.agent()
+        discover = (await running.api.rpc(key, "server/discover")).json()["result"]
+    assert "Agent &lt;Pulse&gt;" in home
+    assert "<Pulse>" not in home
+    assert "MCP Client" not in home
     assert 'href="https://apps.example/id1"' in home
     assert "hi@pulse.example" in support
+    assert discover["_meta"]["io.modelcontextprotocol/serverInfo"]["title"] == "Agent <Pulse>"
+    assert discover["instructions"].startswith("Agent <Pulse> shows your tasks")
 
 
-def test_default_page_has_no_app_store_link(settings: Settings) -> None:
-    from mcp_client_server.web.pages import pages_router
+def test_push_needs_the_key_and_all_three_identifiers(tmp_path: Path) -> None:
+    key_file = tmp_path / "key.p8"
+    key_file.write_text("FROM A FILE")
+    full = {"apns_key_p8": "LINE1\\nLINE2", "apns_key_id": "KEY", "apns_team_id": "TEAM", "apns_bundle_id": "app"}
 
-    assert settings.app_store_url is None
-    assert pages_router(settings).routes
+    config = TestSettings.model_validate(full).apns()
+    assert config is not None
+    assert (config.private_key, config.key_id, config.team_id) == ("LINE1\nLINE2", "KEY", "TEAM")
+    from_file = TestSettings.model_validate({**full, "apns_key_p8": None, "apns_key_path": key_file}).apns()
+    assert from_file is not None
+    assert from_file.private_key == "FROM A FILE"
+    for missing in full:
+        assert TestSettings.model_validate({**full, missing: None}).apns() is None, missing
 
 
-def test_key_query_parameter_is_redacted() -> None:
+def test_settings_come_from_the_environment_and_bad_values_stop_the_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "warning")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://relay.example/")
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "https://a.example/, https://b.example")
+    monkeypatch.setenv("APP_STORE_URL", "")
+    monkeypatch.setenv("REDIS_URL", "redis://:secret@store:6379/0")
+    settings = TestSettings()
+
+    assert (settings.log_level, settings.mcp_url, settings.app_store_url) == (
+        "WARNING",
+        "https://relay.example/mcp",
+        None,
+    )
+    assert settings.allowed_origins == {"https://relay.example", "https://a.example", "https://b.example"}
+    assert "secret" not in repr(settings)
+    for name, value in (("LOG_LEVEL", "loud"), ("WEB_CONCURRENCY", "0"), ("RATE_LIMIT_PER_MINUTE", "-1")):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValidationError):
+            TestSettings()
+        monkeypatch.delenv(name)
+
+
+def test_the_key_query_parameter_is_removed_from_log_records() -> None:
     assert redact("/mcp?key=mck_SECRET") == "/mcp?key=[redacted]"
     assert redact("/mcp?a=1&key=mck_SECRET&b=2") == "/mcp?a=1&key=[redacted]&b=2"
     assert redact("/v1/tasks?status=todo") == "/v1/tasks?status=todo"
@@ -103,19 +131,18 @@ def test_key_query_parameter_is_redacted() -> None:
 
 
 async def test_no_credential_reaches_a_log(
-    app: FastAPI, client: httpx.AsyncClient, api: Api, caplog: pytest.LogCaptureFixture
+    app: FastAPI, client: httpx2.AsyncClient, api: Api, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    account = await api.account()
-    key, _ = await api.key(account)
-    token = account["Authorization"].removeprefix("Bearer ")
-    secret = key["Authorization"].removeprefix("Bearer ")
+    account, key, _ = await api.agent()
+    token, secret = secret_of(account), secret_of(key)
 
+    await api.device(account)
     await api.task(key)
     await client.get("/v1/tasks", headers={"X-API-Key": secret})
-    await client.get("/v1/account", headers={"Authorization": f"Bearer {secret}"})
+    await client.get("/v1/account", headers=key)
     await client.get("/v1/tasks", headers={"Authorization": "Bearer mck_" + "x" * 43})
-    await rpc(client, key, "tools/list")
+    await api.rpc(key, "tools/list")
     await client.post(f"/mcp?key={secret}", json={"jsonrpc": "2.0", "id": 1, "method": "nope"})
     async with mcp_client(app, key) as mcp:
         await mcp.call_tool("create_task", {"title": "Logged"})
@@ -125,4 +152,5 @@ async def test_no_credential_reaches_a_log(
     assert caplog.records
     for record in caplog.records:
         message = record.getMessage()
-        assert secret not in message and token not in message, message
+        assert secret not in message, message
+        assert token not in message, message

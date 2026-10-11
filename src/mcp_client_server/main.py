@@ -1,59 +1,39 @@
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 
+from cryptography import x509
 from fastapi import FastAPI
-from redis.asyncio import BlockingConnectionPool, Redis
-from redis.asyncio.retry import Retry
-from redis.backoff import NoBackoff
+from redis.asyncio import Redis
 
 from mcp_client_server import __version__
 from mcp_client_server.api.errors import install_error_handlers
 from mcp_client_server.api.routes import router as api_router
+from mcp_client_server.appattest import apple_roots
+from mcp_client_server.clock import Clock, SystemClock
 from mcp_client_server.config import Settings, get_settings
 from mcp_client_server.events import EventHub
+from mcp_client_server.ids import IdSource, UlidSource
+from mcp_client_server.limits import Limits
 from mcp_client_server.logsetup import configure_logging
 from mcp_client_server.mcp.server import mcp_route
 from mcp_client_server.push import ApnsClient, PushDispatcher, PushSender, Topics
 from mcp_client_server.services import build_services
-from mcp_client_server.store import Store
+from mcp_client_server.store import RedisSubscriber, Store, command_client, event_client
 from mcp_client_server.web.pages import pages_router
 
 logger = logging.getLogger(__name__)
 
 
-def _command_client(settings: Settings) -> Redis:
-    pool = BlockingConnectionPool.from_url(  # pyright: ignore[reportUnknownMemberType]
-        settings.redis_url,
-        decode_responses=True,
-        max_connections=settings.redis_max_connections,
-        timeout=5,
-        socket_connect_timeout=5,
-        socket_timeout=10,
-        health_check_interval=30,
-    )
-    return Redis.from_pool(pool)
-
-
-def event_client(settings: Settings) -> Redis:
-    # No retry: the hub must see each lost connection, because events are lost with it.
-    return Redis.from_url(  # pyright: ignore[reportUnknownMemberType]
-        settings.redis_url,
-        decode_responses=True,
-        socket_connect_timeout=5,
-        retry=Retry(NoBackoff(), 0),
-    )
-
-
-def _push_sender(settings: Settings) -> PushSender | None:
-    key = settings.apns_private_key() if settings.push_configured else None
-    if not key or not settings.apns_key_id or not settings.apns_team_id:
+def _push_sender(settings: Settings, clock: Clock) -> PushSender | None:
+    config = settings.apns()
+    if config is None:
         logger.warning(
             "push is off: set APNS_KEY_P8 or APNS_KEY_PATH, APNS_KEY_ID, APNS_TEAM_ID, and APNS_BUNDLE_ID to turn it on"
         )
         return None
-    return ApnsClient(private_key=key, key_id=settings.apns_key_id, team_id=settings.apns_team_id)
+    return ApnsClient(config, clock)
 
 
 def _topics(settings: Settings) -> Topics | None:
@@ -68,28 +48,41 @@ def create_app(
     redis: Redis | None = None,
     event_redis: Redis | None = None,
     push_sender: PushSender | None = None,
+    clock: Clock | None = None,
+    ids: IdSource | None = None,
+    limits: Limits | None = None,
+    attest_roots: Sequence[x509.Certificate] | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
+    clock = clock or SystemClock()
+    limits = limits or Limits()
     configure_logging(settings.log_level)
 
-    commands = redis or _command_client(settings)
-    subscriber = event_redis or event_client(settings)
-    store = Store(commands, settings.redis_key_prefix)
-    events = EventHub(subscriber, store.keys.channel_prefix)
-    push = PushDispatcher(store, push_sender or _push_sender(settings), _topics(settings))
-    services = build_services(settings, store, events, push)
+    commands = redis or command_client(settings.redis_url, settings.redis_max_connections)
+    subscriber = event_redis or event_client(settings.redis_url)
+    store = Store(commands, settings.redis_key_prefix, limits)
+    events = EventHub(lambda: RedisSubscriber(subscriber), store.keys, clock)
+    push = PushDispatcher(store, push_sender or _push_sender(settings, clock), _topics(settings), clock)
+    roots = apple_roots() if attest_roots is None else attest_roots
+    services = build_services(settings, store, events, push, clock, ids or UlidSource(), limits, roots)
     route, mcp_sessions = mcp_route(services)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
+        # The store can be down at this point. Each part connects when it needs to, and connects again after a loss.
         await events.start()
-        maintenance = asyncio.create_task(services.maintenance.run(), name="maintenance")
+        loops = [
+            asyncio.create_task(services.maintenance.run(), name="maintenance"),
+            asyncio.create_task(services.maintenance.run_question_expiry(), name="question-expiry"),
+        ]
         try:
             async with mcp_sessions.run():
                 yield
         finally:
-            maintenance.cancel()
-            await asyncio.gather(maintenance, return_exceptions=True)
+            # In the order of the dependencies: the work that makes pushes stops first, the connections close last.
+            for loop in loops:
+                loop.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
             await events.stop()
             await push.aclose()
             await subscriber.aclose()
@@ -106,6 +99,6 @@ def create_app(
     app.state.services = services
     install_error_handlers(app)
     app.include_router(api_router)
-    app.include_router(pages_router(settings))
+    app.include_router(pages_router(settings, limits))
     app.router.routes.append(route)
     return app

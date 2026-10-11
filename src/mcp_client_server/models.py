@@ -1,53 +1,84 @@
-from typing import Annotated, Any, Literal, get_args
+"""The contract objects of docs/api.md. REST and MCP share these definitions."""
+
+import base64
+import binascii
+from typing import Annotated, Literal, get_args
 
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
-    StrictBool,
-    StrictInt,
     StringConstraints,
+    ValidationInfo,
     field_validator,
 )
 
 from mcp_client_server import limits
+from mcp_client_server.credentials import Secret
+from mcp_client_server.errors import ErrorCode
+from mcp_client_server.ids import AccountId, DeviceId, KeyId, QuestionId, TaskId
 
 Status = Literal["todo", "in_progress", "done", "cancelled"]
 Priority = Literal["low", "medium", "high", "urgent"]
 Source = Literal["agent", "app"]
 Platform = Literal["ios", "ipados", "watchos"]
 ApnsEnvironment = Literal["production", "sandbox"]
+PatchField = Literal["title", "description", "status", "priority", "notify", "progress", "status_note"]
+QuestionKind = Literal["confirm", "choice", "text"]
+QuestionStatus = Literal["pending", "answered", "expired", "cancelled"]
 
 STATUSES: tuple[Status, ...] = get_args(Status)
 PRIORITIES: tuple[Priority, ...] = get_args(Priority)
-OPEN_STATUSES: frozenset[Status] = frozenset({"todo", "in_progress"})
-CLOSED_STATUSES: frozenset[Status] = frozenset({"done", "cancelled"})
-
-
-def _one_line(value: str) -> str:
-    text = " ".join(value.split())
-    if not text:
-        raise ValueError("Must not be empty.")
-    return text
+OPEN_STATUSES: tuple[Status, ...] = ("todo", "in_progress")
+CLOSED_STATUSES: tuple[Status, ...] = ("done", "cancelled")
+QUESTION_STATUSES: tuple[QuestionStatus, ...] = get_args(QuestionStatus)
+CONFIRM_OPTIONS = ("Yes", "No")
 
 
 def _collapse(value: str) -> str:
     return " ".join(value.split())
 
 
+def _one_line(value: str) -> str:
+    text = _collapse(value)
+    if not text:
+        raise ValueError("Must not be empty.")
+    return text
+
+
+def _from_base64(value: object) -> bytes:
+    if not isinstance(value, str):
+        raise ValueError("Must be base64 text.")  # noqa: TRY004  pydantic reports a ValueError as a field problem
+    try:
+        return base64.b64decode(value, validate=True)
+    except binascii.Error as exc:
+        raise ValueError("Must be base64 text.") from exc
+
+
+def split_commas(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
 Title = Annotated[str, StringConstraints(min_length=1, max_length=limits.TITLE_MAX), AfterValidator(_one_line)]
 Description = Annotated[str, StringConstraints(max_length=limits.DESCRIPTION_MAX)]
 StatusNote = Annotated[str, StringConstraints(max_length=limits.STATUS_NOTE_MAX), AfterValidator(_collapse)]
 Label = Annotated[str, StringConstraints(min_length=1, max_length=limits.LABEL_MAX), AfterValidator(_one_line)]
-Progress = Annotated[StrictInt, Field(ge=0, le=100)]
+Progress = Annotated[int, Field(ge=0, le=100)]
 NotifyTitle = Annotated[
     str, StringConstraints(min_length=1, max_length=limits.NOTIFY_TITLE_MAX), AfterValidator(_one_line)
 ]
 NotifyBody = Annotated[str, StringConstraints(min_length=1, max_length=limits.NOTIFY_BODY_MAX)]
+PageLimit = Annotated[int, Field(ge=1, le=limits.LIST_LIMIT_MAX)]
+Prompt = Annotated[str, StringConstraints(min_length=1, max_length=limits.PROMPT_MAX), AfterValidator(_one_line)]
+Option = Annotated[str, StringConstraints(min_length=1, max_length=limits.OPTION_MAX), AfterValidator(_one_line)]
+Answer = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=limits.ANSWER_MAX)]
+ExpiresIn = Annotated[int, Field(ge=limits.EXPIRES_IN_MIN, le=limits.EXPIRES_IN_MAX)]
+WaitSeconds = Annotated[int, Field(ge=0, le=limits.WAIT_MAX_SECONDS)]
 
-DeviceId = Annotated[
-    str, StringConstraints(pattern=r"^dev_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+ClientDeviceId = Annotated[
+    DeviceId, StringConstraints(pattern=r"^dev_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ]
 HexToken = Annotated[
     str, StringConstraints(pattern=r"^[0-9a-fA-F]+$", min_length=8, max_length=512), AfterValidator(str.lower)
@@ -55,9 +86,13 @@ HexToken = Annotated[
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=100)]
 
 
-class Task(BaseModel):
-    id: str
-    key_id: str
+class _Object(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+
+class Task(_Object):
+    id: TaskId
+    key_id: KeyId
     title: str
     description: str
     status: Status
@@ -75,20 +110,20 @@ class Task(BaseModel):
         return self.status in OPEN_STATUSES
 
 
-class ClientInfo(BaseModel):
+class ClientInfo(_Object):
     name: str
     version: str
 
 
-class KeyCounts(BaseModel):
+class KeyCounts(_Object):
     todo: int = 0
     in_progress: int = 0
     done: int = 0
     cancelled: int = 0
 
 
-class Key(BaseModel):
-    id: str
+class Key(_Object):
+    id: KeyId
     label: str
     prefix: str
     last4: str
@@ -98,18 +133,18 @@ class Key(BaseModel):
     counts: KeyCounts = Field(default_factory=KeyCounts)
 
 
-class AccountSettings(BaseModel):
+class AccountSettings(_Object):
     live_activities: bool = True
 
 
-class Account(BaseModel):
-    id: str
+class Account(_Object):
+    id: AccountId
     created_at: float
     settings: AccountSettings = Field(default_factory=AccountSettings)
 
 
-class Device(BaseModel):
-    id: str
+class Device(_Object):
+    id: DeviceId
     platform: Platform
     model: str
     os_version: str
@@ -117,19 +152,43 @@ class Device(BaseModel):
     apns_environment: ApnsEnvironment
     apns_token: str | None
     push_to_start_token: str | None
+    widget_push_token: str | None = None
     updated_at: float
 
 
+class Question(_Object):
+    id: QuestionId
+    key_id: KeyId
+    task_id: TaskId | None
+    prompt: str
+    kind: QuestionKind
+    options: list[str]
+    status: QuestionStatus
+    answer: str | None
+    created_at: float
+    answered_at: float | None
+    expires_at: float
+
+
 class _Request(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
 
-class EmptyBody(_Request):
-    pass
+class AttestationInput(_Request):
+    # The key identifier of App Attest: the SHA-256 hash of the public key.
+    key_id: Annotated[bytes, BeforeValidator(_from_base64), Field(min_length=32, max_length=32)]
+    challenge: Annotated[str, StringConstraints(min_length=1, max_length=200)]
+    attestation_object: Annotated[
+        bytes, BeforeValidator(_from_base64), Field(alias="object", min_length=1, max_length=16_384)
+    ]
+
+
+class AccountCreate(_Request):
+    attestation: AttestationInput | None = None
 
 
 class AccountSettingsPatch(_Request):
-    live_activities: StrictBool
+    live_activities: bool
 
 
 class AccountPatch(_Request):
@@ -144,6 +203,7 @@ class DeviceInput(_Request):
     apns_environment: ApnsEnvironment
     apns_token: HexToken | None = None
     push_to_start_token: HexToken | None = None
+    widget_push_token: HexToken | None = None
 
 
 class KeyCreate(_Request):
@@ -155,26 +215,28 @@ class KeyPatch(_Request):
 
 
 class TaskCreate(_Request):
-    key_id: str | None = None
+    key_id: KeyId | None = None
     title: Title
     description: Description = ""
     status: Status = "todo"
     priority: Priority = "medium"
-    notify: StrictBool = True
+    notify: bool = True
 
 
 class TaskPatch(_Request):
+    """A field that is not in `model_fields_set` does not change. Only `progress` and `status_note` accept null."""
+
     title: Title | None = None
     description: Description | None = None
     status: Status | None = None
     priority: Priority | None = None
-    notify: StrictBool | None = None
+    notify: bool | None = None
     progress: Progress | None = None
     status_note: StatusNote | None = None
 
     @field_validator("title", "description", "status", "priority", "notify", mode="before")
     @classmethod
-    def _not_null(cls, value: Any) -> Any:
+    def _not_null(cls, value: object) -> object:
         if value is None:
             raise ValueError("Must not be null.")
         return value
@@ -183,32 +245,87 @@ class TaskPatch(_Request):
 class NotifyInput(_Request):
     title: NotifyTitle
     body: NotifyBody
-    task_id: str | None = None
+    task_id: TaskId | None = None
+
+
+class QuestionCreate(_Request):
+    prompt: Prompt
+    kind: QuestionKind = "confirm"
+    options: list[Option] | None = Field(default=None, validate_default=True)
+    task_id: TaskId | None = None
+    expires_in: ExpiresIn = limits.EXPIRES_IN_DEFAULT
+
+    @field_validator("options")
+    @classmethod
+    def _options_fit_the_kind(cls, options: list[str] | None, info: ValidationInfo) -> list[str] | None:
+        kind: object = info.data.get("kind")
+        if kind != "choice":
+            if options is not None:
+                raise ValueError("Only a question of the kind choice has options.")
+            return None
+        if options is None or not limits.OPTIONS_MIN <= len(options) <= limits.OPTIONS_MAX:
+            raise ValueError(f"A choice needs {limits.OPTIONS_MIN} to {limits.OPTIONS_MAX} options.")
+        if len(set(options)) != len(options):
+            raise ValueError("Each option must be different.")
+        return options
+
+
+class QuestionAnswer(_Request):
+    answer: Answer
 
 
 class LiveActivityInput(_Request):
-    device_id: DeviceId
+    device_id: ClientDeviceId
     push_token: HexToken
 
 
 class LiveActivityRemoval(_Request):
-    device_id: DeviceId
+    device_id: ClientDeviceId
 
 
-class AccountCreated(BaseModel):
+class AccountCreated(_Object):
     account: Account
-    token: str
+    token: Secret
 
 
-class KeyCreated(BaseModel):
+class KeyCreated(_Object):
     key: Key
-    secret: str
+    secret: Secret
 
 
-class KeyList(BaseModel):
+class KeyList(_Object):
     keys: list[Key]
 
 
-class NotifyResult(BaseModel):
+class QuestionList(_Object):
+    questions: list[Question]
+
+
+class TaskList(_Object):
+    tasks: list[Task]
+    next_cursor: str | None
+
+
+class AttestChallenge(_Object):
+    challenge: str
+    expires_in: int
+
+
+class NotifyResult(_Object):
     sent: bool
     devices: int
+
+
+class Health(_Object):
+    status: Literal["ok", "unavailable"]
+    store: Literal["ok", "unavailable"]
+
+
+class ErrorBody(_Object):
+    code: ErrorCode
+    message: str
+    fields: dict[str, str] | None = None
+
+
+class ErrorResponse(_Object):
+    error: ErrorBody

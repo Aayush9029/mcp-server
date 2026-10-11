@@ -1,22 +1,27 @@
 import logging
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-import httpx
+import httpx2
 import jwt
+from pydantic import BaseModel, ValidationError
 
+from mcp_client_server.clock import Clock
+from mcp_client_server.config import ApnsConfig
+from mcp_client_server.models import ApnsEnvironment
 from mcp_client_server.push.payloads import PushRequest, encode
 
 logger = logging.getLogger(__name__)
 
-HOSTS = {
+HOSTS: dict[ApnsEnvironment, str] = {
     "production": "https://api.push.apple.com",
     "sandbox": "https://api.sandbox.push.apple.com",
 }
 # APNs rejects a provider token that is older than one hour.
 _JWT_LIFETIME_SECONDS = 50 * 60
+_OK = 200
+_GONE = 410
+_FORBIDDEN = 403
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,11 +31,11 @@ class PushResult:
 
     @property
     def ok(self) -> bool:
-        return self.status == 200
+        return self.status == _OK
 
     @property
     def token_is_dead(self) -> bool:
-        return self.status == 410 or self.reason == "BadDeviceToken"
+        return self.status == _GONE or self.reason == "BadDeviceToken"
 
 
 class PushSender(Protocol):
@@ -39,51 +44,57 @@ class PushSender(Protocol):
     async def aclose(self) -> None: ...
 
 
+class _ErrorBody(BaseModel):
+    reason: str | None = None
+
+
+class _ProviderToken:
+    """The ES256 token that authenticates this server to APNs. PyJWT is used only here."""
+
+    def __init__(self, config: ApnsConfig, clock: Clock) -> None:
+        self._config = config
+        self._clock = clock
+        self._signed: tuple[str, float] | None = None
+
+    def current(self) -> str:
+        now = self._clock.now()
+        if self._signed and now - self._signed[1] < _JWT_LIFETIME_SECONDS:
+            return self._signed[0]
+        token = jwt.encode(
+            {"iss": self._config.team_id, "iat": int(now)},
+            self._config.private_key,
+            algorithm="ES256",
+            headers={"kid": self._config.key_id},
+        )
+        self._signed = (token, now)
+        return token
+
+    def discard(self) -> None:
+        self._signed = None
+
+
 class ApnsClient:
     """APNs over HTTP/2 with token (JWT) authentication."""
 
-    def __init__(
-        self,
-        *,
-        private_key: str,
-        key_id: str,
-        team_id: str,
-        http: httpx.AsyncClient | None = None,
-        clock: Callable[[], float] = time.time,
-    ) -> None:
-        self._private_key = private_key
-        self._key_id = key_id
-        self._team_id = team_id
-        self._http = http or httpx.AsyncClient(http2=True, timeout=httpx.Timeout(10.0))
+    def __init__(self, config: ApnsConfig, clock: Clock, http: httpx2.AsyncClient | None = None) -> None:
+        self._http = http or httpx2.AsyncClient(http2=True, timeout=httpx2.Timeout(10.0))
         self._clock = clock
-        self._jwt: tuple[str, float] | None = None
+        self._token = _ProviderToken(config, clock)
         # A key that cannot sign must stop the startup, not each push.
-        self._provider_token()
+        self._token.current()
 
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    def _provider_token(self) -> str:
-        now = self._clock()
-        if self._jwt and now - self._jwt[1] < _JWT_LIFETIME_SECONDS:
-            return self._jwt[0]
-        token = jwt.encode(
-            {"iss": self._team_id, "iat": int(now)},
-            self._private_key,
-            algorithm="ES256",
-            headers={"kid": self._key_id},
-        )
-        self._jwt = (token, now)
-        return token
-
     def _headers(self, request: PushRequest) -> dict[str, str]:
         headers = {
-            "authorization": f"bearer {self._provider_token()}",
+            "authorization": f"bearer {self._token.current()}",
             "apns-topic": request.topic,
             "apns-push-type": request.push_type,
-            "apns-priority": str(request.priority),
-            "apns-expiration": str(int(self._clock()) + request.ttl_seconds),
+            "apns-expiration": str(int(self._clock.now()) + request.ttl_seconds),
         }
+        if request.priority is not None:
+            headers["apns-priority"] = str(request.priority)
         if request.collapse_id:
             headers["apns-collapse-id"] = request.collapse_id
         return headers
@@ -95,22 +106,22 @@ class ApnsClient:
         for _ in range(2):
             try:
                 response = await self._http.post(url, content=body, headers=self._headers(request))
-            except httpx.TransportError as exc:
+            except httpx2.TransportError as exc:
                 # APNs closes idle connections. One more try opens a new one.
                 result = PushResult(0, type(exc).__name__)
                 continue
             result = PushResult(response.status_code, _reason(response))
-            if result.status == 403 and result.reason == "ExpiredProviderToken":
-                self._jwt = None
+            if result.status == _FORBIDDEN and result.reason == "ExpiredProviderToken":
+                self._token.discard()
                 continue
             break
         return result
 
 
-def _reason(response: httpx.Response) -> str | None:
-    if response.status_code == 200:
+def _reason(response: httpx2.Response) -> str | None:
+    if response.status_code == _OK:
         return None
     try:
-        return response.json().get("reason")
-    except ValueError:
+        return _ErrorBody.model_validate_json(response.content).reason
+    except ValidationError:
         return None

@@ -32,6 +32,12 @@ services:
         sync: false
       - key: APNS_BUNDLE_ID
         sync: false
+      - key: APP_ATTEST_APP_IDS
+        sync: false
+      - key: APP_ATTEST_ENVIRONMENT
+        sync: false
+      - key: APP_TOTP_SECRET
+        sync: false
 
   - type: keyvalue
     name: mcp-client-store

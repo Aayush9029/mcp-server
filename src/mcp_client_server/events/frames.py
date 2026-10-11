@@ -1,40 +1,109 @@
-import json
-from typing import Any
+"""Server-sent event frames from docs/api.md. A frame is the unit that goes through pub/sub."""
 
-from mcp_client_server.models import Key, Task
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
+
+from mcp_client_server.ids import AccountId, KeyId, QuestionId, TaskId
+from mcp_client_server.models import Key, Question, Task
+
+EventName = Literal[
+    "ready",
+    "task.created",
+    "task.updated",
+    "task.deleted",
+    "key.created",
+    "key.updated",
+    "key.deleted",
+    "question.created",
+    "question.updated",
+    "account.deleted",
+]
 
 PING = ": ping\n\n"
-ACCOUNT_DELETED = "account.deleted"
+_FINAL_PREFIX = "event: account.deleted\n"
+_KEY_DELETED_PREFIX = "event: key.deleted\n"
 
 
-def frame(event: str, data: dict[str, Any]) -> str:
-    """One server-sent event. json.dumps never writes a raw newline, so the data is one line."""
-    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+class _Data(BaseModel):
+    model_config = ConfigDict(frozen=True)
 
 
-def event_name(sse_frame: str) -> str:
-    return sse_frame.partition("\n")[0].removeprefix("event: ")
+class _Ready(_Data):
+    account_id: AccountId
 
 
-def ready(account_id: str) -> str:
-    return frame("ready", {"account_id": account_id})
+class _TaskData(_Data):
+    task: Task
 
 
-def task_event(kind: str, task: Task) -> str:
-    return f'event: task.{kind}\ndata: {{"task":{task.model_dump_json()}}}\n\n'
+class _TaskDeleted(_Data):
+    task_id: TaskId
+    key_id: KeyId
+
+
+class _KeyData(_Data):
+    key: Key
+
+
+class _KeyDeleted(_Data):
+    key_id: KeyId
+
+
+class _QuestionData(_Data):
+    question: Question
+
+
+def _frame(event: EventName, data: BaseModel) -> str:
+    # pydantic writes JSON with no raw newline, so the data is one line.
+    return f"event: {event}\ndata: {data.model_dump_json()}\n\n"
+
+
+def is_final(frame: str) -> bool:
+    """True for the frame after which the server closes the stream."""
+    return frame.startswith(_FINAL_PREFIX)
+
+
+def can_change_question(frame: str, question_id: QuestionId) -> bool:
+    """True for a frame after which a question can have a new status, or can be gone with its key."""
+    return question_id in frame or frame.startswith(_KEY_DELETED_PREFIX)
+
+
+def ready(account_id: AccountId) -> str:
+    return _frame("ready", _Ready(account_id=account_id))
+
+
+def task_created(task: Task) -> str:
+    return _frame("task.created", _TaskData(task=task))
+
+
+def task_updated(task: Task) -> str:
+    return _frame("task.updated", _TaskData(task=task))
 
 
 def task_deleted(task: Task) -> str:
-    return frame("task.deleted", {"task_id": task.id, "key_id": task.key_id})
+    return _frame("task.deleted", _TaskDeleted(task_id=task.id, key_id=task.key_id))
 
 
-def key_event(kind: str, key: Key) -> str:
-    return frame(f"key.{kind}", {"key": key.model_dump(mode="json")})
+def key_created(key: Key) -> str:
+    return _frame("key.created", _KeyData(key=key))
 
 
-def key_deleted(key_id: str) -> str:
-    return frame("key.deleted", {"key_id": key_id})
+def key_updated(key: Key) -> str:
+    return _frame("key.updated", _KeyData(key=key))
+
+
+def key_deleted(key_id: KeyId) -> str:
+    return _frame("key.deleted", _KeyDeleted(key_id=key_id))
+
+
+def question_created(question: Question) -> str:
+    return _frame("question.created", _QuestionData(question=question))
+
+
+def question_updated(question: Question) -> str:
+    return _frame("question.updated", _QuestionData(question=question))
 
 
 def account_deleted() -> str:
-    return frame(ACCOUNT_DELETED, {})
+    return _frame("account.deleted", _Data())

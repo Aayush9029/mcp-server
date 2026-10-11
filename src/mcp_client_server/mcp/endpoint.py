@@ -4,22 +4,21 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from mcp_client_server.api.deps import request_credential
-from mcp_client_server.credentials import Principal
+from mcp_client_server.credentials import AgentPrincipal, presented_secret
 from mcp_client_server.errors import Forbidden
 from mcp_client_server.services.auth import AuthService
 
-_principal: ContextVar[Principal | None] = ContextVar("mcp_principal", default=None)
+_principal: ContextVar[AgentPrincipal | None] = ContextVar("mcp_principal", default=None)
 
 
-def current_principal() -> Principal:
+def current_principal() -> AgentPrincipal:
     principal = _principal.get()
     if principal is None:
         raise RuntimeError("No API key is authenticated in this context.")
     return principal
 
 
-def optional_principal() -> Principal | None:
+def optional_principal() -> AgentPrincipal | None:
     return _principal.get()
 
 
@@ -42,8 +41,8 @@ class McpEndpoint:
         origin = request.headers.get("origin")
         if origin and origin.rstrip("/") not in self._allowed_origins:
             raise Forbidden("This origin cannot use the MCP endpoint.")
-        principal = await self._auth.authenticate(request_credential(request, allow_query=True))
-        if not principal.is_agent:
+        principal = await self._auth.authenticate(presented_secret(request.headers, request.query_params))
+        if not isinstance(principal, AgentPrincipal):
             raise Forbidden("The MCP endpoint needs an API key (mck_). The account token cannot use it.")
         token = _principal.set(principal)
         try:

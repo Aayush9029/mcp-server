@@ -22,12 +22,13 @@ import statistics
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TypedDict
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 
 OPEN_TASKS_PER_KEY = 1000
+SEED_TASKS = 500
 KEYS_PER_ACCOUNT = 20
 MCP_VERSION = "2026-07-28"
 MCP_META = {
@@ -36,9 +37,20 @@ MCP_META = {
     "io.modelcontextprotocol/clientInfo": {"name": "load-script", "version": "1"},
 }
 
-Headers = dict[str, str]
-Target = tuple[str, int]
-Reply = tuple[int, bytes]
+type Headers = dict[str, str]
+type Target = tuple[str, int]
+type Reply = tuple[int, bytes]
+_HTTP_ERROR = 400
+
+
+class Row(TypedDict):
+    operation: str
+    requests: int
+    errors: int
+    rps: float
+    p50_ms: float
+    p95_ms: float
+    p99_ms: float
 
 
 class Connection:
@@ -68,7 +80,7 @@ class Connection:
             self._writer.close()
 
 
-Shoot = Callable[[Connection, int, int], Awaitable[Reply]]
+type Shoot = Callable[[Connection, int, int], Awaitable[Reply]]
 
 
 @dataclass
@@ -79,7 +91,7 @@ class Result:
     seconds: float
     latencies_ms: list[float]
 
-    def row(self) -> dict[str, Any]:
+    def row(self) -> Row:
         cuts = statistics.quantiles(self.latencies_ms, n=100) if len(self.latencies_ms) > 1 else [0.0] * 99
         return {
             "operation": self.name,
@@ -92,19 +104,19 @@ class Result:
         }
 
 
-async def new_account(http: httpx.AsyncClient) -> Headers:
+async def new_account(http: httpx2.AsyncClient) -> Headers:
     response = await http.post("/v1/accounts", json={})
     response.raise_for_status()
     return {"Authorization": f"Bearer {response.json()['token']}"}
 
 
-async def new_key(http: httpx.AsyncClient, account: Headers, label: str) -> Headers:
+async def new_key(http: httpx2.AsyncClient, account: Headers, label: str) -> Headers:
     response = await http.post("/v1/keys", json={"label": label}, headers=account)
     response.raise_for_status()
     return {"Authorization": f"Bearer {response.json()['secret']}"}
 
 
-async def new_keys(http: httpx.AsyncClient, count: int) -> list[Headers]:
+async def new_keys(http: httpx2.AsyncClient, count: int) -> list[Headers]:
     keys: list[Headers] = []
     while len(keys) < count:
         account = await new_account(http)
@@ -127,7 +139,7 @@ async def run(name: str, target: Target, shoot: Shoot, total: int, concurrency: 
                 started = time.perf_counter()
                 status, body = await shoot(connection, index, number)
                 latencies.append((time.perf_counter() - started) * 1000)
-                if status >= 400 or b'"isError":true' in body:
+                if status >= _HTTP_ERROR or b'"isError":true' in body:
                     errors += 1
         finally:
             connection.close()
@@ -137,7 +149,7 @@ async def run(name: str, target: Target, shoot: Shoot, total: int, concurrency: 
     return Result(name, len(latencies), errors, time.perf_counter() - started, latencies)
 
 
-async def create_task(http: httpx.AsyncClient, target: Target, total: int, concurrency: int) -> Result:
+async def create_task(http: httpx2.AsyncClient, target: Target, total: int, concurrency: int) -> Result:
     keys = await new_keys(http, -(-total // OPEN_TASKS_PER_KEY))
     body = {"title": "Load test task", "description": "Made by scripts/load.py", "priority": "high"}
     payload = json.dumps(body).encode()
@@ -149,13 +161,13 @@ async def create_task(http: httpx.AsyncClient, target: Target, total: int, concu
     return await run("create_task", target, shoot, total, concurrency)
 
 
-async def list_tasks(http: httpx.AsyncClient, target: Target, total: int, concurrency: int) -> Result:
+async def list_tasks(http: httpx2.AsyncClient, target: Target, total: int, concurrency: int) -> Result:
     key = (await new_keys(http, 1))[0]
-    for number in range(500):
+    for number in range(SEED_TASKS):
         body = {"title": f"Seed task {number}", "description": "x" * 200, "status": "todo" if number % 2 else "done"}
         (await http.post("/v1/tasks", json=body, headers=key)).raise_for_status()
     check = await http.get("/v1/tasks?limit=500", headers=key)
-    assert len(check.json()["tasks"]) == 500, "the seed did not make 500 tasks"
+    assert len(check.json()["tasks"]) == SEED_TASKS, "the seed did not make 500 tasks"
 
     async def shoot(connection: Connection, _: int, __: int) -> Reply:
         return await connection.request("GET", "/v1/tasks?limit=500", key)
@@ -163,7 +175,7 @@ async def list_tasks(http: httpx.AsyncClient, target: Target, total: int, concur
     return await run("list_tasks_500", target, shoot, total, concurrency)
 
 
-async def mcp_call(http: httpx.AsyncClient, target: Target, total: int, concurrency: int) -> Result:
+async def mcp_call(http: httpx2.AsyncClient, target: Target, total: int, concurrency: int) -> Result:
     key = (await new_keys(http, 1))[0]
     headers = {
         **key,
@@ -198,7 +210,18 @@ async def mcp_call(http: httpx.AsyncClient, target: Target, total: int, concurre
     return await run("mcp_tools_call_update_task", target, shoot, total, concurrency)
 
 
-SCENARIOS = {"create_task": create_task, "list_tasks": list_tasks, "mcp_call": mcp_call}
+type Scenario = Callable[[httpx2.AsyncClient, Target, int, int], Awaitable[Result]]
+SCENARIOS: dict[str, Scenario] = {"create_task": create_task, "list_tasks": list_tasks, "mcp_call": mcp_call}
+
+
+@dataclass(frozen=True)
+class Options:
+    url: str
+    concurrency: int
+    requests: int
+    list_requests: int
+    only: list[str]
+    json: bool
 
 
 async def main() -> None:
@@ -209,14 +232,22 @@ async def main() -> None:
     parser.add_argument("--list-requests", type=int, default=3_000, help="requests for list_tasks")
     parser.add_argument("--only", choices=sorted(SCENARIOS), action="append")
     parser.add_argument("--json", action="store_true", help="print one JSON object for each operation")
-    args = parser.parse_args()
+    parsed = vars(parser.parse_args())
+    args = Options(
+        url=str(parsed["url"]),
+        concurrency=int(parsed["concurrency"]),
+        requests=int(parsed["requests"]),
+        list_requests=int(parsed["list_requests"]),
+        only=[str(name) for name in parsed["only"] or SCENARIOS],
+        json=bool(parsed["json"]),
+    )
 
     url = urlsplit(args.url)
     target = (url.hostname or "127.0.0.1", url.port or 80)
-    async with httpx.AsyncClient(base_url=args.url, timeout=30) as http:
+    async with httpx2.AsyncClient(base_url=args.url, timeout=30) as http:
         (await http.get("/health")).raise_for_status()
-        rows: list[dict[str, Any]] = []
-        for name in args.only or list(SCENARIOS):
+        rows: list[Row] = []
+        for name in args.only:
             total = args.list_requests if name == "list_tasks" else args.requests
             rows.append((await SCENARIOS[name](http, target, total, args.concurrency)).row())
 
