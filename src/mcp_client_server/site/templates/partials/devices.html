@@ -1,19 +1,34 @@
+{# Device frames. Each one holds a capture of the app from `static/img/`. See `scripts/site_images.py --list`. #}
 {% macro phone(name, alt, loading="lazy") -%}
 <div class="device phone">
   <div class="device-body">
     <div class="device-screen">
       <img src="{{ asset('img/' ~ name ~ '.avif') }}" alt="{{ alt }}" width="660" height="1435"{% if loading == "lazy" %} loading="lazy"{% elif loading == "first" %} fetchpriority="high"{% endif %} decoding="async">
-      <span class="device-island"></span>
     </div>
   </div>
 </div>
 {%- endmacro %}
 
-{% macro phone_art(label, variant="") -%}
-<div class="device phone{% if variant %} {{ variant }}{% endif %}" role="img" aria-label="{{ label }}">
+{# One frame for each kind of capture of a Live Activity layout. The picker shows one layout at a time. #}
+{% macro live_phone(layouts) -%}
+<div class="device phone">
   <div class="device-body">
-    <div class="device-screen device-art">
-      {{ caller() }}
+    <div class="device-screen">
+      {% for layout in layouts %}
+      <img class="live-shot live-shot-{{ layout.id }}" src="{{ asset('img/iphone-live-' ~ layout.id ~ '.avif') }}" alt="The Lock Screen with a Live Activity in the {{ layout.name }} layout. {{ layout.lock }}" width="660" height="1435" loading="lazy" decoding="async">
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro live_island(layouts) -%}
+<div class="device phone phone-top">
+  <div class="device-body">
+    <div class="device-screen">
+      {% for layout in layouts %}
+      <img class="live-shot live-shot-{{ layout.id }}" src="{{ asset('img/island-' ~ layout.id ~ '.avif') }}" alt="The open Dynamic Island in the {{ layout.name }} layout. {{ layout.island }}" width="660" height="416" loading="lazy" decoding="async">
+      {% endfor %}
     </div>
   </div>
 </div>
@@ -29,17 +44,7 @@
 </div>
 {%- endmacro %}
 
-{% macro watch(label) -%}
-<div class="device watch" role="img" aria-label="{{ label }}">
-  <div class="device-body">
-    <div class="device-screen device-art">
-      {{ caller() }}
-    </div>
-  </div>
-</div>
-{%- endmacro %}
-
-{% macro watch_image(name, alt) -%}
+{% macro watch(name, alt) -%}
 <div class="device watch">
   <div class="device-body">
     <div class="device-screen">

@@ -14,8 +14,13 @@
 # or jq, because no agent brings them. curl gets the API key through stdin, and the script prints
 # the key nowhere. When the server does not answer, the script prints nothing and exits 0.
 #
+# Each request has the header X-Relaydeck-Host with the name of this machine, so the app can show
+# where the agent runs. The name comes from the configuration of the agent, else from
+# RELAYDECK_HOST, else from the short host name.
+#
 # Environment, for a self-hosted server and for the tests:
 #   RELAYDECK_URL           the server, for example http://localhost:8000
+#   RELAYDECK_HOST          the name of this machine for the app
 #   RELAYDECK_HOOK_TIMEOUT  seconds for one request (default 5)
 #   RELAYDECK_HOOK_WAIT     seconds that "watch" holds one request open (default 50)
 #   RELAYDECK_HOOK_PAUSE    seconds that "watch" waits after a request that failed (default 30)
@@ -23,7 +28,7 @@
 set -u
 umask 077
 
-VERSION=1.1.0
+VERSION=1.2.0
 DEFAULT_BASE="https://relaydeck.onrender.com"
 LIMIT=5
 WATCH_MINUTES=480
@@ -154,8 +159,8 @@ END {
     printf "</relaydeck-inbox>\n"
 }'
 
-# Prints "url", "key", and "env" lines for one MCP server table of a Codex config.toml, in the
-# form of JSON_FLAT.
+# Prints "url", "key", "env", and "host" lines for one MCP server table of a Codex config.toml,
+# in the form of JSON_FLAT.
 # shellcheck disable=SC2016  # an awk program: $0 and $1 are awk fields
 CODEX_TABLE='
 /^[ \t]*\[/ {
@@ -169,6 +174,12 @@ CODEX_TABLE='
 /Authorization/ && match($0, /Bearer mck_[A-Za-z0-9_-]+/) { print "key\ts\t" substr($0, RSTART + 7, RLENGTH - 7) }
 /^[ \t]*bearer_token_env_var[ \t]*=/ && match($0, /"[A-Za-z_][A-Za-z0-9_]*"/) {
     print "env\ts\t" substr($0, RSTART + 1, RLENGTH - 2)
+}
+match($0, /X-Relaydeck-Host"?[ \t]*=[ \t]*"[^"]*"/) {
+    host = substr($0, RSTART, RLENGTH)
+    sub(/^[^=]*=[ \t]*"/, "", host)
+    sub(/"$/, "", host)
+    print "host\ts\t" host
 }'
 
 # ---------------------------------------------------------------- input
@@ -211,6 +222,7 @@ read_json_config() {
     KEY=$(field "mcpServers.$SERVER.headers.Authorization")
     KEY=${KEY#Bearer }
     MCP_URL=$(field "mcpServers.$SERVER.$2")
+    MACHINE=$(field "mcpServers.$SERVER.headers.X-Relaydeck-Host")
 }
 
 read_codex_config() {
@@ -222,6 +234,7 @@ read_codex_config() {
     FLAT=$rc_table
     KEY=$(field key)
     MCP_URL=$(field url)
+    MACHINE=$(field host)
     rc_env=$(field env)
     if [ -z "$KEY" ]; then
         # The Codex plugin names an environment variable for the key.
@@ -229,17 +242,37 @@ read_codex_config() {
     fi
 }
 
-# Sets KEY and BASE. Each agent keeps its own key, because each key has its own inbox.
+# The name of this machine for the app: the name in $1, else the short host name. Only letters,
+# digits, ".", "_", and "-" stay, and the name has 64 characters at most.
+machine_name() {
+    mn_name=$1
+    if [ -z "$mn_name" ]; then
+        mn_name=$(hostname -s 2>/dev/null) || mn_name=''
+    fi
+    if [ -z "$mn_name" ]; then
+        mn_name=$(uname -n 2>/dev/null) || mn_name=''
+        mn_name=${mn_name%%.*}
+    fi
+    mn_name=$(printf '%s' "$mn_name" | tr -c 'A-Za-z0-9._-' '-' | tr -s '-' | cut -c 1-64)
+    mn_name=${mn_name#-}
+    printf '%s\n' "${mn_name%-}"
+}
+
+# Sets KEY, BASE, and MACHINE. Each agent keeps its own key, because each key has its own inbox.
 find_server() {
-    KEY='' MCP_URL=''
+    KEY='' MCP_URL='' MACHINE=''
     case $AGENT in
-        claude) KEY=${CLAUDE_PLUGIN_OPTION_API_KEY:-} ;;
+        claude)
+            KEY=${CLAUDE_PLUGIN_OPTION_API_KEY:-}
+            MACHINE=${CLAUDE_PLUGIN_OPTION_HOST_NAME:-}
+            ;;
         codex) read_codex_config ;;
         gemini) read_json_config "$HOME/.gemini/settings.json" httpUrl ;;
         cursor) read_json_config "$HOME/.cursor/mcp.json" url ;;
     esac
     FLAT=''
     valid_key "$KEY" || return 1
+    MACHINE=$(machine_name "${MACHINE:-${RELAYDECK_HOST:-}}")
     BASE=${RELAYDECK_URL:-${MCP_URL:-$DEFAULT_BASE}}
     BASE=${BASE%/}
     BASE=${BASE%/mcp}
@@ -248,7 +281,7 @@ find_server() {
 
 # request PATH SECONDS: sets CODE and BODY. CODE is 000 when there is no answer.
 request() {
-    rq_out=$(printf 'header = "Authorization: Bearer %s"\n' "$KEY" |
+    rq_out=$(printf 'header = "Authorization: Bearer %s"\nheader = "X-Relaydeck-Host: %s"\n' "$KEY" "$MACHINE" |
         curl -sS -K - -A "relaydeck-hook/$VERSION ($AGENT)" -H 'Accept: application/json' \
             --connect-timeout 3 --max-time "$2" -w '\n%{http_code}' "$BASE$1" 2>/dev/null) || rq_out=''
     CODE=000 BODY=''

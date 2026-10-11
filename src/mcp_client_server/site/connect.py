@@ -29,11 +29,32 @@ class Action:
 
 
 @dataclass(frozen=True, slots=True)
+class Mark:
+    """A brand mark: an official file from the asset catalog of the app, copied byte for byte.
+
+    A mark that the app shows in one color takes the text color here. The other marks keep their colors.
+    """
+
+    id: str
+    one_color: bool
+
+    @property
+    def asset(self) -> str:
+        return f"img/brand-{self.id}.svg"
+
+
+CLAUDE_MARK = Mark("claude", one_color=False)
+OPENAI_MARK = Mark("openai", one_color=True)
+CURSOR_MARK = Mark("cursor", one_color=True)
+
+
+@dataclass(frozen=True, slots=True)
 class AgentTab:
     id: str
     name: str
     steps: tuple[Step, ...]
     action: Action | None = None
+    mark: Mark | None = None
 
 
 def install_command(settings: Settings) -> str:
@@ -66,7 +87,8 @@ def _claude_code(mcp_url: str, plugin: Plugin | None) -> AgentTab:
         f'claude mcp add --transport http {SERVER_NAME} {mcp_url} --header "Authorization: Bearer {KEY_PLACEHOLDER}"'
     )
     if not plugin:
-        return AgentTab("claude-code", "Claude Code", (Step("Run this in a terminal", code_block(direct, "bash")),))
+        steps = (Step("Run this in a terminal", code_block(direct, "bash")),)
+        return AgentTab("claude-code", "Claude Code", steps, mark=CLAUDE_MARK)
     session = f"/plugin marketplace add {plugin.source}\n/plugin install {plugin.selector}"
     shell = f"claude plugin install {plugin.name} --marketplace {plugin.source}"
     if plugin.config_key:
@@ -87,6 +109,7 @@ def _claude_code(mcp_url: str, plugin: Plugin | None) -> AgentTab:
             ),
             Step("Or add the server without the plugin", code_block(direct, "bash")),
         ),
+        mark=CLAUDE_MARK,
     )
 
 
@@ -95,7 +118,8 @@ def _codex(mcp_url: str, plugin: Plugin | None) -> AgentTab:
     direct = f"{export}\ncodex mcp add {SERVER_NAME} --url {mcp_url} --bearer-token-env-var {KEY_ENV}"
     note = f"Codex reads the key from {KEY_ENV}. Put the export line in your shell profile."
     if not plugin:
-        return AgentTab("codex", "Codex", (Step("Run this in a terminal", code_block(direct, "bash"), note),))
+        steps = (Step("Run this in a terminal", code_block(direct, "bash"), note),)
+        return AgentTab("codex", "Codex", steps, mark=OPENAI_MARK)
     env = plugin.key_env or KEY_ENV
     install = (
         f"export {env}={KEY_PLACEHOLDER}\n"
@@ -113,6 +137,7 @@ def _codex(mcp_url: str, plugin: Plugin | None) -> AgentTab:
             ),
             Step("Or add the server without the plugin", code_block(direct, "bash")),
         ),
+        mark=OPENAI_MARK,
     )
 
 
@@ -126,6 +151,7 @@ def _cursor(mcp_url: str) -> AgentTab:
             cursor_install_link(mcp_url),
             f"Cursor opens and shows the server. Replace {KEY_PLACEHOLDER} with your key, then install.",
         ),
+        CURSOR_MARK,
     )
 
 

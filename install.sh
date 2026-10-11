@@ -79,6 +79,8 @@ Options:
                   or RELAYDECK_API_KEY is safer.
   --url URL       MCP endpoint (default: $DEFAULT_URL)
   --name NAME     Name of the MCP server in each agent (default: $DEFAULT_NAME)
+  --host NAME     Name of this machine in the app (default: the short host
+                  name). The agents send it with each request.
   --uninstall     Remove the server and the inbox hooks from the agents. This
                   removes only an entry that has the same name and the same URL.
   --dry-run       Show the changes, and change nothing
@@ -116,17 +118,17 @@ print_log() {
 
 parse_args() {
     URL=$DEFAULT_URL NAME=$DEFAULT_NAME KEY=${RELAYDECK_API_KEY:-}
-    AGENTS_ARG='' ACTION=install DRY_RUN=0 YES=0
+    AGENTS_ARG='' HOST_ARG='' ACTION=install DRY_RUN=0 YES=0
     # The agent commands that the installer starts do not need the key in their environment.
     unset RELAYDECK_API_KEY
     while [ $# -gt 0 ]; do
         case $1 in
-            --agents | --key | --url | --name)
+            --agents | --key | --url | --name | --host)
                 [ $# -ge 2 ] || usage_error "$1 needs a value."
                 set_option "$1" "$2"
                 shift 2
                 ;;
-            --agents=* | --key=* | --url=* | --name=*)
+            --agents=* | --key=* | --url=* | --name=* | --host=*)
                 set_option "${1%%=*}" "${1#*=}"
                 shift
                 ;;
@@ -143,10 +145,32 @@ parse_args() {
     if [ -n "$KEY" ] && ! valid_key "$KEY"; then
         usage_error "That is not a Relaydeck API key. An API key starts with mck_."
     fi
+    MACHINE=$(machine_name "$HOST_ARG")
+    if [ -z "$MACHINE" ]; then
+        [ -z "$HOST_ARG" ] || usage_error "--host needs a name that has a letter or a digit."
+        MACHINE=unknown
+    fi
     AGENTS=''
     if [ -n "$AGENTS_ARG" ]; then
         read_agent_list "$AGENTS_ARG"
     fi
+}
+
+# The name of this machine for the app: the name that the person gave, else the short host name.
+# Only letters, digits, ".", "_", and "-" stay, so the name is safe in JSON, in TOML, and in an
+# HTTP header. The name has 64 characters at most.
+machine_name() {
+    mn_name=$1
+    if [ -z "$mn_name" ]; then
+        mn_name=$(hostname -s 2>/dev/null) || mn_name=''
+    fi
+    if [ -z "$mn_name" ]; then
+        mn_name=$(uname -n 2>/dev/null) || mn_name=''
+        mn_name=${mn_name%%.*}
+    fi
+    mn_name=$(printf '%s' "$mn_name" | tr -c 'A-Za-z0-9._-' '-' | tr -s '-' | cut -c 1-64)
+    mn_name=${mn_name#-}
+    printf '%s\n' "${mn_name%-}"
 }
 
 set_option() {
@@ -155,6 +179,7 @@ set_option() {
         --key) KEY=$2 ;;
         --url) URL=$2 ;;
         --name) NAME=$2 ;;
+        --host) HOST_ARG=$2 ;;
     esac
 }
 
@@ -1032,7 +1057,8 @@ json_connected() {
     return 1
 }
 
-auth_header() { printf '"headers":{"Authorization":"Bearer %s"}' "$KEY"; }
+# The headers of each request to the server: the API key, and the name of this machine for the app.
+auth_header() { printf '"headers":{"Authorization":"Bearer %s","X-Relaydeck-Host":"%s"}' "$KEY" "$MACHINE"; }
 
 # ---------------------------------------------------------------- inbox hooks
 #
@@ -1183,8 +1209,13 @@ hook_script() {
 # or jq, because no agent brings them. curl gets the API key through stdin, and the script prints
 # the key nowhere. When the server does not answer, the script prints nothing and exits 0.
 #
+# Each request has the header X-Relaydeck-Host with the name of this machine, so the app can show
+# where the agent runs. The name comes from the configuration of the agent, else from
+# RELAYDECK_HOST, else from the short host name.
+#
 # Environment, for a self-hosted server and for the tests:
 #   RELAYDECK_URL           the server, for example http://localhost:8000
+#   RELAYDECK_HOST          the name of this machine for the app
 #   RELAYDECK_HOOK_TIMEOUT  seconds for one request (default 5)
 #   RELAYDECK_HOOK_WAIT     seconds that "watch" holds one request open (default 50)
 #   RELAYDECK_HOOK_PAUSE    seconds that "watch" waits after a request that failed (default 30)
@@ -1192,7 +1223,7 @@ hook_script() {
 set -u
 umask 077
 
-VERSION=1.1.0
+VERSION=1.2.0
 DEFAULT_BASE="https://relaydeck.onrender.com"
 LIMIT=5
 WATCH_MINUTES=480
@@ -1323,8 +1354,8 @@ END {
     printf "</relaydeck-inbox>\n"
 }'
 
-# Prints "url", "key", and "env" lines for one MCP server table of a Codex config.toml, in the
-# form of JSON_FLAT.
+# Prints "url", "key", "env", and "host" lines for one MCP server table of a Codex config.toml,
+# in the form of JSON_FLAT.
 # shellcheck disable=SC2016  # an awk program: $0 and $1 are awk fields
 CODEX_TABLE='
 /^[ \t]*\[/ {
@@ -1338,6 +1369,12 @@ CODEX_TABLE='
 /Authorization/ && match($0, /Bearer mck_[A-Za-z0-9_-]+/) { print "key\ts\t" substr($0, RSTART + 7, RLENGTH - 7) }
 /^[ \t]*bearer_token_env_var[ \t]*=/ && match($0, /"[A-Za-z_][A-Za-z0-9_]*"/) {
     print "env\ts\t" substr($0, RSTART + 1, RLENGTH - 2)
+}
+match($0, /X-Relaydeck-Host"?[ \t]*=[ \t]*"[^"]*"/) {
+    host = substr($0, RSTART, RLENGTH)
+    sub(/^[^=]*=[ \t]*"/, "", host)
+    sub(/"$/, "", host)
+    print "host\ts\t" host
 }'
 
 # ---------------------------------------------------------------- input
@@ -1380,6 +1417,7 @@ read_json_config() {
     KEY=$(field "mcpServers.$SERVER.headers.Authorization")
     KEY=${KEY#Bearer }
     MCP_URL=$(field "mcpServers.$SERVER.$2")
+    MACHINE=$(field "mcpServers.$SERVER.headers.X-Relaydeck-Host")
 }
 
 read_codex_config() {
@@ -1391,6 +1429,7 @@ read_codex_config() {
     FLAT=$rc_table
     KEY=$(field key)
     MCP_URL=$(field url)
+    MACHINE=$(field host)
     rc_env=$(field env)
     if [ -z "$KEY" ]; then
         # The Codex plugin names an environment variable for the key.
@@ -1398,17 +1437,37 @@ read_codex_config() {
     fi
 }
 
-# Sets KEY and BASE. Each agent keeps its own key, because each key has its own inbox.
+# The name of this machine for the app: the name in $1, else the short host name. Only letters,
+# digits, ".", "_", and "-" stay, and the name has 64 characters at most.
+machine_name() {
+    mn_name=$1
+    if [ -z "$mn_name" ]; then
+        mn_name=$(hostname -s 2>/dev/null) || mn_name=''
+    fi
+    if [ -z "$mn_name" ]; then
+        mn_name=$(uname -n 2>/dev/null) || mn_name=''
+        mn_name=${mn_name%%.*}
+    fi
+    mn_name=$(printf '%s' "$mn_name" | tr -c 'A-Za-z0-9._-' '-' | tr -s '-' | cut -c 1-64)
+    mn_name=${mn_name#-}
+    printf '%s\n' "${mn_name%-}"
+}
+
+# Sets KEY, BASE, and MACHINE. Each agent keeps its own key, because each key has its own inbox.
 find_server() {
-    KEY='' MCP_URL=''
+    KEY='' MCP_URL='' MACHINE=''
     case $AGENT in
-        claude) KEY=${CLAUDE_PLUGIN_OPTION_API_KEY:-} ;;
+        claude)
+            KEY=${CLAUDE_PLUGIN_OPTION_API_KEY:-}
+            MACHINE=${CLAUDE_PLUGIN_OPTION_HOST_NAME:-}
+            ;;
         codex) read_codex_config ;;
         gemini) read_json_config "$HOME/.gemini/settings.json" httpUrl ;;
         cursor) read_json_config "$HOME/.cursor/mcp.json" url ;;
     esac
     FLAT=''
     valid_key "$KEY" || return 1
+    MACHINE=$(machine_name "${MACHINE:-${RELAYDECK_HOST:-}}")
     BASE=${RELAYDECK_URL:-${MCP_URL:-$DEFAULT_BASE}}
     BASE=${BASE%/}
     BASE=${BASE%/mcp}
@@ -1417,7 +1476,7 @@ find_server() {
 
 # request PATH SECONDS: sets CODE and BODY. CODE is 000 when there is no answer.
 request() {
-    rq_out=$(printf 'header = "Authorization: Bearer %s"\n' "$KEY" |
+    rq_out=$(printf 'header = "Authorization: Bearer %s"\nheader = "X-Relaydeck-Host: %s"\n' "$KEY" "$MACHINE" |
         curl -sS -K - -A "relaydeck-hook/$VERSION ($AGENT)" -H 'Accept: application/json' \
             --connect-timeout 3 --max-time "$2" -w '\n%{http_code}' "$BASE$1" 2>/dev/null) || rq_out=''
     CODE=000 BODY=''
@@ -1677,7 +1736,11 @@ claude_plugin_install() {
         claude plugin marketplace update "$PLUGIN_MARKETPLACE" >/dev/null 2>&1 </dev/null || true
         claude plugin update "$PLUGIN_ID" --scope user >/dev/null 2>&1 </dev/null || true
     fi
-    if ! printf '{"api_key":"%s"}\n' "$KEY" | claude plugin configure "$PLUGIN_ID" --values-stdin >"$LOG" 2>&1; then
+    # An earlier version of the plugin has no option for the host name, and Claude Code refuses a
+    # name that it does not know. Then the installer saves only the key.
+    if ! printf '{"api_key":"%s","host_name":"%s"}\n' "$KEY" "$MACHINE" |
+        claude plugin configure "$PLUGIN_ID" --values-stdin >"$LOG" 2>&1 &&
+        ! printf '{"api_key":"%s"}\n' "$KEY" | claude plugin configure "$PLUGIN_ID" --values-stdin >"$LOG" 2>&1; then
         finish fail "the plugin is installed, but Claude Code could not save the API key. In Claude Code, run: /plugin configure $PLUGIN_ID"
         return 0
     fi
@@ -1708,7 +1771,9 @@ claude_mcp_state() {
     case $cs_output in *"URL: $URL$NL"*) ;; *) CLAUDE_STATE=foreign && return 0 ;; esac
     CLAUDE_STATE=stale
     if [ -n "$KEY" ]; then
-        case $cs_output in *"Authorization: Bearer $KEY$NL"*) CLAUDE_STATE=same ;; esac
+        case $cs_output in
+            *"Authorization: Bearer $KEY$NL"*"X-Relaydeck-Host: $MACHINE$NL"*) CLAUDE_STATE=same ;;
+        esac
     fi
 }
 
@@ -1732,7 +1797,7 @@ claude_mcp_install() {
     # "claude mcp add" accepts a header only as an argument, so the key is in this argument list
     # for a moment. The plugin path does not have this limit.
     if ! claude mcp add --transport http --scope user "$NAME" "$URL" \
-        --header "Authorization: Bearer $KEY" >"$LOG" 2>&1 </dev/null; then
+        --header "Authorization: Bearer $KEY" --header "X-Relaydeck-Host: $MACHINE" >"$LOG" 2>&1 </dev/null; then
         finish fail "\"claude mcp add\" failed."
         return 0
     fi
@@ -1803,7 +1868,11 @@ codex_state() {
         CODEX_STATE=foreign
         case $cx_output in *"\"url\":\"$URL\""*) CODEX_STATE=stale ;; esac
         if [ "$CODEX_STATE" = stale ] && [ -n "$KEY" ]; then
-            case $cx_output in *"\"Authorization\":\"Bearer$KEY\""*) CODEX_STATE=same ;; esac
+            case $cx_output in
+                *"\"Authorization\":\"Bearer$KEY\""*)
+                    case $cx_output in *"\"X-Relaydeck-Host\":\"$MACHINE\""*) CODEX_STATE=same ;; esac
+                    ;;
+            esac
         fi
     elif codex mcp list --json >/dev/null 2>&1 </dev/null; then
         CODEX_STATE=absent
@@ -1838,8 +1907,8 @@ codex_append() {
         fi
         printf '\n' >>"$WORK/out"
     fi
-    printf '[mcp_servers.%s]\nurl = "%s"\nhttp_headers = { Authorization = "Bearer %s" }\n' \
-        "$NAME" "$URL" "$KEY" >>"$WORK/out"
+    printf '[mcp_servers.%s]\nurl = "%s"\nhttp_headers = { Authorization = "Bearer %s", X-Relaydeck-Host = "%s" }\n' \
+        "$NAME" "$URL" "$KEY" "$MACHINE" >>"$WORK/out"
     commit_file "$ca_file" "$WORK/out"
 }
 
@@ -2265,9 +2334,14 @@ summary() {
         say "Removed Relaydeck from $(agents_count "$CHANGED")."
     elif [ "$CHANGED" -gt 0 ]; then
         say "${BOLD}Done.${RESET} $(agents_count "$CHANGED") can now use the server \"$NAME\" at $URL."
-        next_steps
     elif [ "$FAILED" = 0 ]; then
         say "Each agent was already set up."
+    fi
+    if [ "$ACTION" = install ]; then
+        say "The app shows this machine as \"$MACHINE\". Use --host to give a different name."
+        if [ "$DRY_RUN" = 0 ] && [ "$CHANGED" -gt 0 ]; then
+            next_steps
+        fi
     fi
     if [ "$FAILED" -gt 0 ]; then
         say "${RED}Not complete for $(agents_count "$FAILED").${RESET} Read the lines with \"$MARK_FAIL\". Manual steps: $MANUAL_URL"

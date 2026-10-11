@@ -29,6 +29,8 @@ GOOD_KEY = "mck_" + "A1b2C3d4" * 5
 SECOND_KEY = "mck_" + "Z9y8X7w6" * 5
 BAD_KEY = "mck_" + "0" * 40
 OLD_KEY = "mck_" + "0ldKey00" * 5
+# The name that the stub `hostname` command gives for the machine of each test.
+HOST = "test-mac"
 
 SYSTEM_TOOLS = (
     "basename",
@@ -74,7 +76,7 @@ CLAUDE_STUB = (
     STUB_HEADER
     + """
 path = STATE / "claude.json"
-state = {"marketplaces": [], "plugins": [], "key": None, "servers": {}}
+state = {"marketplaces": [], "plugins": [], "key": None, "host": None, "servers": {}}
 if path.exists():
     state = json.loads(path.read_text())
 
@@ -121,14 +123,17 @@ elif ARGS[:2] == ["plugin", "configure"] and "--values-stdin" in ARGS:
         stop("No installed plugin has the id")
     if "configure" in FAIL:
         stop("Failed to save configuration: Failed to save sensitive plugin options to secure storage")
-    state["key"] = json.loads(STDIN)["api_key"]
+    values = json.loads(STDIN)
+    if "hostoption" in FAIL and "host_name" in values:
+        stop('Failed to save configuration: This plugin has no option "host_name". Known options: api_key.')
+    state["key"], state["host"] = values["api_key"], values.get("host_name")
     save()
     print("Configuration saved. Restart Claude Code to apply it.")
 elif ARGS[:2] == ["plugin", "uninstall"]:
     if ARGS[2] not in state["plugins"]:
         stop("Plugin not found in installed plugins")
     state["plugins"].remove(ARGS[2])
-    state["key"] = None
+    state["key"] = state["host"] = None
     save()
 elif ARGS[:2] == ["mcp", "get"]:
     server = state["servers"].get(ARGS[2])
@@ -140,13 +145,17 @@ elif ARGS[:2] == ["mcp", "get"]:
     print("  Type: http")
     print("  URL: %s" % server["url"])
     print("  Headers:")
-    print("    %s" % server["header"])
+    for header in server["headers"]:
+        print("    %s" % header)
     print("")
     print("To remove this server, run: claude mcp remove %s -s user" % ARGS[2])
 elif ARGS[:2] == ["mcp", "add"]:
-    words, options, rest = [], {}, ARGS[2:]
+    words, options, sent, rest = [], {}, [], ARGS[2:]
     while rest:
-        if rest[0] in ("--transport", "--scope", "--header"):
+        if rest[0] == "--header":
+            sent.append(rest[1])
+            rest = rest[2:]
+        elif rest[0] in ("--transport", "--scope"):
             options[rest[0]] = rest[1]
             rest = rest[2:]
         else:
@@ -156,7 +165,7 @@ elif ARGS[:2] == ["mcp", "add"]:
         stop("the stub accepts only an HTTP server in the user scope")
     if words[0] in state["servers"]:
         stop("MCP server %s already exists in user config" % words[0])
-    state["servers"][words[0]] = {"url": words[1], "header": options["--header"]}
+    state["servers"][words[0]] = {"url": words[1], "headers": sent}
     save()
 elif ARGS[:2] == ["mcp", "remove"]:
     if ARGS[2] not in state["servers"]:
@@ -412,6 +421,7 @@ class Sandbox:
     def __post_init__(self) -> None:
         for directory in (self.home, self.bin, self.state, self.codex_home, self.root / "tmp"):
             directory.mkdir()
+        self.stub("hostname", f"#!/bin/sh\necho {HOST}\n")
 
     @property
     def home(self) -> Path:
@@ -533,8 +543,13 @@ def files_with(box: Sandbox, text: str) -> list[str]:
     return sorted(name for name, content in box.snapshot().items() if text.encode() in content)
 
 
-def entry(url: str, key: str = GOOD_KEY, url_field: str = "url") -> Json:
-    return {url_field: url, "headers": {"Authorization": f"Bearer {key}"}}
+def headers(key: str = GOOD_KEY, host: str = HOST) -> Json:
+    """The headers that the installer gives to each agent: the key, and the name of the machine for the app."""
+    return {"Authorization": f"Bearer {key}", "X-Relaydeck-Host": host}
+
+
+def entry(url: str, key: str = GOOD_KEY, url_field: str = "url", host: str = HOST) -> Json:
+    return {url_field: url, "headers": headers(key, host)}
 
 
 def read_json(path: Path) -> Json:
@@ -568,7 +583,7 @@ def gemini_hooks(name: str = "tasks") -> Json:
 def test_help_lists_each_flag(box: Sandbox) -> None:
     result = box.run("--help")
     assert result.code == 0
-    for flag in ("--agents", "--key", "--url", "--name", "--uninstall", "--dry-run", "--yes", "--help"):
+    for flag in ("--agents", "--key", "--url", "--name", "--host", "--uninstall", "--dry-run", "--yes", "--help"):
         assert flag in result.out
     assert "RELAYDECK_API_KEY" in result.out
     listed = result.out.split("with commas between them:")[1].split("--key")[0]
@@ -590,6 +605,8 @@ def test_help_lists_each_flag(box: Sandbox) -> None:
         (["--agents", "cursor", "--url", 'https://example.com/"x'], "--url must be an http or https URL"),
         (["--agents", "cursor", "--name", "bad name"], "--name can have only"),
         (["--agents", "cursor", "--key", "not-a-key"], "An API key starts with mck_"),
+        (["--agents", "cursor", "--host"], "--host needs a value"),
+        (["--agents", "cursor", "--host", '"!?"'], "--host needs a name that has a letter or a digit"),
     ],
 )
 def test_a_bad_option_is_a_usage_error(box: Sandbox, args: list[str], message: str) -> None:
@@ -801,6 +818,78 @@ def test_three_bad_keys_stop_the_installer(box: Sandbox, key_server: KeyServer) 
     assert box.files() == set()
 
 
+# ------------------------------------------------------------------ the name of the machine
+
+
+def test_each_agent_gets_the_host_name(box: Sandbox, key_server: KeyServer) -> None:
+    box.stub("claude", CLAUDE_STUB)
+    box.stub("codex", CODEX_STUB)
+    args = ["--url", key_server.url, "--agents", "claude,codex,cursor"]
+    planned = box.run(*args, "--dry-run")
+    assert f'The app shows this machine as "{HOST}". Use --host to give a different name.' in planned.out
+
+    result = box.run(*args, key=GOOD_KEY)
+    assert result.code == 0, result.text
+    assert f'The app shows this machine as "{HOST}".' in result.out
+    cursor = box.home / ".cursor/mcp.json"
+    assert read_json(cursor)["mcpServers"]["tasks"]["headers"] == headers()
+    config = box.codex_home / "config.toml"
+    assert tomllib.loads(config.read_text())["mcp_servers"]["tasks"]["http_headers"] == headers()
+    assert box.claude_state()["servers"]["tasks"]["headers"][1] == f"X-Relaydeck-Host: {HOST}"
+    assert box.run(*args, key=GOOD_KEY).out.count("No change.") == 3
+
+    # A different name updates each entry. The name loses each character that is not safe in a header.
+    renamed = box.run(*args, "--host", 'Work "Mac" №1', key=GOOD_KEY)
+    assert renamed.code == 0, renamed.text
+    assert 'The app shows this machine as "Work-Mac-1".' in renamed.out
+    assert renamed.out.count("updated") == 2
+    assert read_json(cursor)["mcpServers"]["tasks"]["headers"] == headers(host="Work-Mac-1")
+    assert tomllib.loads(config.read_text())["mcp_servers"]["tasks"]["http_headers"] == headers(host="Work-Mac-1")
+    assert box.claude_state()["servers"]["tasks"]["headers"][1] == "X-Relaydeck-Host: Work-Mac-1"
+    assert box.run(*args, "--host=Work-Mac-1", key=GOOD_KEY).out.count("No change.") == 3
+
+    removed = box.run(*args, "--uninstall")
+    assert removed.code == 0, removed.text
+    assert "Removed Relaydeck from 3 agents." in removed.out
+    assert "The app shows this machine" not in removed.out
+    assert "X-Relaydeck-Host" not in cursor.read_text() + config.read_text()
+    assert files_with(box, "mck_") == []
+
+
+@pytest.mark.parametrize(
+    ("hostname", "uname", "expected"),
+    [
+        ("echo studio.local", "echo other", "studio.local"),
+        ("exit 1", "echo build-box.example.com", "build-box"),
+        ("echo", "echo 'box 2'", "box-2"),
+        ("echo " + "a" * 80, "echo other", "a" * 64),
+        ("exit 1", "exit 1", "unknown"),
+    ],
+)
+def test_the_host_name_comes_from_the_machine(box: Sandbox, hostname: str, uname: str, expected: str) -> None:
+    box.stub("hostname", f"#!/bin/sh\n{hostname}\n")
+    box.stub("uname", f"#!/bin/sh\ncase $1 in -n) {uname} ;; *) echo Linux ;; esac\n")
+    result = box.run("--agents", "cursor", "--dry-run")
+    assert result.code == 0, result.text
+    assert f'The app shows this machine as "{expected}".' in result.out
+
+
+def test_the_claude_code_plugin_gets_the_host_name(box: Sandbox) -> None:
+    box.stub("claude", CLAUDE_STUB)
+    box.stub("curl", CURL_STUB)
+    result = box.run("--agents", "claude", "--host", "studio", key=GOOD_KEY)
+    assert result.code == 0, result.text
+    assert box.calls("claude")[-1]["stdin"] == f'{{"api_key":"{GOOD_KEY}","host_name":"studio"}}\n'
+    assert box.claude_state()["host"] == "studio"
+
+    # An earlier version of the plugin has no option for the name. The key is saved without it.
+    earlier = box.run("--agents", "claude", key=SECOND_KEY, env={"STUB_FAIL": "hostoption"})
+    assert earlier.code == 0, earlier.text
+    assert "Saved the API key again." in earlier.out
+    assert box.calls("claude")[-1]["stdin"] == f'{{"api_key":"{SECOND_KEY}"}}\n'
+    assert box.claude_state()["key"] == SECOND_KEY
+
+
 # ------------------------------------------------------------------ JSON files (Cursor, Gemini CLI, opencode, Zed)
 
 
@@ -809,21 +898,20 @@ def test_each_json_agent_gets_its_own_format(box: Sandbox, key_server: KeyServer
     result = box.run("--url", key_server.url, "--agents", agents, key=GOOD_KEY)
     assert result.code == 0, result.text
     url = key_server.url
-    headers = {"Authorization": f"Bearer {GOOD_KEY}"}
-    remote: Json = {"url": url, "headers": headers}
+    remote: Json = {"url": url, "headers": headers()}
     cline: Json = {"type": "streamableHttp", **remote, "disabled": False, "autoApprove": []}
     expected: dict[str, Json] = {
         ".cursor/mcp.json": {"mcpServers": {"tasks": remote}},
         ".gemini/settings.json": {
-            "mcpServers": {"tasks": {"httpUrl": url, "headers": headers}},
+            "mcpServers": {"tasks": {"httpUrl": url, "headers": headers()}},
             "hooks": gemini_hooks(),
         },
         ".config/opencode/opencode.json": {
-            "mcp": {"tasks": {"type": "remote", "url": url, "enabled": True, "oauth": False, "headers": headers}}
+            "mcp": {"tasks": {"type": "remote", "url": url, "enabled": True, "oauth": False, "headers": headers()}}
         },
         ".config/zed/settings.json": {"context_servers": {"tasks": remote}},
         ".copilot/mcp-config.json": {"mcpServers": {"tasks": {"type": "http", **remote, "tools": ["*"]}}},
-        ".gemini/config/mcp_config.json": {"mcpServers": {"tasks": {"serverUrl": url, "headers": headers}}},
+        ".gemini/config/mcp_config.json": {"mcpServers": {"tasks": {"serverUrl": url, "headers": headers()}}},
         ".kiro/settings/mcp.json": {"mcpServers": {"tasks": remote}},
         ".factory/mcp.json": {"mcpServers": {"tasks": {"type": "http", **remote, "disabled": False}}},
         ".cline/data/settings/cline_mcp_settings.json": {"mcpServers": {"tasks": cline}},
@@ -880,7 +968,8 @@ def test_a_merge_keeps_the_other_servers(box: Sandbox, key_server: KeyServer) ->
         '        "tasks": {\n'
         f'            "url": "{key_server.url}",\n'
         '            "headers": {\n'
-        f'                "Authorization": "Bearer {GOOD_KEY}"\n'
+        f'                "Authorization": "Bearer {GOOD_KEY}",\n'
+        f'                "X-Relaydeck-Host": "{HOST}"\n'
         "            }\n"
         "        },\n"
     )
@@ -1184,7 +1273,7 @@ def test_a_new_key_replaces_the_old_key(box: Sandbox, key_server: KeyServer) -> 
     assert read_json(cursor) == {"mcpServers": {"tasks": entry(key_server.url, SECOND_KEY)}}
     config = box.codex_home / "config.toml"
     servers = tomllib.loads(config.read_text())["mcp_servers"]
-    assert servers == {"tasks": {"url": key_server.url, "http_headers": {"Authorization": f"Bearer {SECOND_KEY}"}}}
+    assert servers == {"tasks": {"url": key_server.url, "http_headers": headers(SECOND_KEY)}}
     # The backup of a key change would hold only the old key, so there is none.
     assert backups(cursor) == []
     assert "backup" not in next(line for line in result.out.splitlines() if "Cursor" in line)
@@ -1366,6 +1455,7 @@ def test_claude_code_uses_the_plugin_for_the_hosted_server(box: Sandbox) -> None
         "marketplaces": ["Aayush9029/mcp-server"],
         "plugins": ["relaydeck@relaydeck"],
         "key": GOOD_KEY,
+        "host": HOST,
         "servers": {},
     }
     for tool in ("claude", "curl"):
@@ -1392,7 +1482,7 @@ def test_claude_code_uses_the_plugin_for_the_hosted_server(box: Sandbox) -> None
     removed = box.run("--agents", "claude", "--uninstall")
     assert removed.code == 0, removed.text
     assert "removed the plugin relaydeck@relaydeck and the marketplace relaydeck" in removed.out
-    assert box.claude_state() == {"marketplaces": [], "plugins": [], "key": None, "servers": {}}
+    assert box.claude_state() == {"marketplaces": [], "plugins": [], "key": None, "host": None, "servers": {}}
     assert "Nothing to remove." in box.run("--agents", "claude", "--uninstall").out
 
 
@@ -1459,13 +1549,16 @@ def test_claude_code_uses_mcp_add_for_a_different_server(box: Sandbox, key_serve
         key_server.url,
         "--header",
         f"Authorization: Bearer {GOOD_KEY}",
+        "--header",
+        f"X-Relaydeck-Host: {HOST}",
     ]
     assert not any(command.startswith("plugin") for command in box.commands("claude"))
 
     rotated = box.run(*args, key=SECOND_KEY)
     assert rotated.code == 0, rotated.text
     assert box.commands("claude")[-2] == "mcp remove mine --scope user"
-    assert box.claude_state()["servers"]["mine"]["header"] == f"Authorization: Bearer {SECOND_KEY}"
+    sent = [f"Authorization: Bearer {SECOND_KEY}", f"X-Relaydeck-Host: {HOST}"]
+    assert box.claude_state()["servers"]["mine"]["headers"] == sent
 
     removed = box.run(*args, "--uninstall")
     assert removed.code == 0, removed.text
@@ -1493,7 +1586,8 @@ def test_codex_gets_a_stored_header(box: Sandbox, key_server: KeyServer) -> None
     config.chmod(0o640)
     result = box.run("--url", key_server.url, "--agents", "codex", key=GOOD_KEY)
     assert result.code == 0, result.text
-    table = f'[mcp_servers.tasks]\nurl = "{key_server.url}"\nhttp_headers = {{ Authorization = "Bearer {GOOD_KEY}" }}\n'
+    sent = f'{{ Authorization = "Bearer {GOOD_KEY}", X-Relaydeck-Host = "{HOST}" }}'
+    table = f'[mcp_servers.tasks]\nurl = "{key_server.url}"\nhttp_headers = {sent}\n'
     assert config.read_text() == original + "\n\n" + table
     assert config.stat().st_mode & 0o777 == 0o600
     assert [backup.read_text() for backup in backups(config)] == [original]
@@ -1507,7 +1601,7 @@ def test_codex_makes_a_new_config_file(box: Sandbox, key_server: KeyServer) -> N
     assert result.code == 0, result.text
     config = box.codex_home / "config.toml"
     assert tomllib.loads(config.read_text()) == {
-        "mcp_servers": {"tasks": {"url": key_server.url, "http_headers": {"Authorization": f"Bearer {GOOD_KEY}"}}}
+        "mcp_servers": {"tasks": {"url": key_server.url, "http_headers": headers()}}
     }
     assert config.read_text().startswith("[mcp_servers.tasks]\n")
     assert backups(config) == []
@@ -1521,7 +1615,7 @@ def test_codex_replaces_an_entry_that_reads_an_environment_variable(box: Sandbox
     assert result.code == 0, result.text
     assert 'updated "tasks"' in result.out
     servers = tomllib.loads(config.read_text())["mcp_servers"]
-    assert servers == {"tasks": {"url": key_server.url, "http_headers": {"Authorization": f"Bearer {GOOD_KEY}"}}}
+    assert servers == {"tasks": {"url": key_server.url, "http_headers": headers()}}
     assert len(backups(config)) == 1
     assert "TASKS_API_KEY" in backups(config)[0].read_text()
 
@@ -1565,7 +1659,7 @@ def test_the_codex_plugin_keeps_its_server(box: Sandbox, key_server: KeyServer) 
     assert installed.code == 0, installed.text
     assert 'added "tasks" to' in installed.out
     servers = tomllib.loads(config.read_text())["mcp_servers"]
-    assert servers == {"tasks": {"url": key_server.url, "http_headers": {"Authorization": f"Bearer {GOOD_KEY}"}}}
+    assert servers == {"tasks": {"url": key_server.url, "http_headers": headers()}}
     assert "No change." in box.run(*args, key=GOOD_KEY, env=plugin).out
 
     removed = box.run(*args, "--uninstall", env=plugin)
@@ -1604,7 +1698,7 @@ def test_codex_gets_the_plugin_for_the_inbox_hooks(box: Sandbox) -> None:
     config = box.codex_home / "config.toml"
     servers = tomllib.loads(config.read_text())["mcp_servers"]
     url = "https://relaydeck.onrender.com/mcp"
-    assert servers == {"tasks": {"url": url, "http_headers": {"Authorization": f"Bearer {GOOD_KEY}"}}}
+    assert servers == {"tasks": {"url": url, "http_headers": headers()}}
     assert codex_plugins(box) == {"marketplaces": ["Aayush9029/mcp-server"], "installed": ["relaydeck@relaydeck"]}
     assert all(GOOD_KEY not in " ".join(call["argv"]) for call in box.calls("codex"))
 

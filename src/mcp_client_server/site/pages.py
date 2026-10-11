@@ -30,7 +30,8 @@ XML = "application/xml; charset=utf-8"
 # A page stays in a cache for a short time, because the URL of an asset changes when the asset changes.
 SHORT = "public, max-age=300"
 DAY = "public, max-age=86400"
-UPDATED = "October 10, 2026"
+PRIVACY_UPDATED = "October 11, 2026"
+TERMS_UPDATED = "October 10, 2026"
 APPLE_EULA = "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/"
 
 # A shell variable near the top of the install script that holds the default server URL.
@@ -40,6 +41,7 @@ _DEFAULT_URL = re.compile(
 )
 _SCRIPT_HEAD_LINES = 40
 _DAY_SECONDS = 86400
+_HOUR_SECONDS = 3600
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,10 +117,14 @@ def build_site(settings: Settings, limits: Limits, root: Path | None = None) -> 
         "copy_button": COPY_BUTTON,
         "key_placeholder": KEY_PLACEHOLDER,
         "task_days": limits.closed_task_ttl_seconds // _DAY_SECONDS,
+        "closed_tasks": f"{limits.max_closed_tasks_per_key:,}",
         "question_days": limits.closed_question_ttl_seconds // _DAY_SECONDS,
+        "inbox_days": limits.unread_inbox_ttl_seconds // _DAY_SECONDS,
+        "inbox_read_hours": limits.read_inbox_ttl_seconds // _HOUR_SECONDS,
+        "log_entries": f"{limits.activity_log_entries:,}",
+        "log_days": limits.activity_log_ttl_seconds // _DAY_SECONDS,
         "uses_app_attest": bool(settings.attest_app_ids),
         "asset": assets.url,
-        "has_asset": assets.has,
         "docs": docs,
         "year": datetime.now(UTC).year,
     }
@@ -143,12 +149,12 @@ def build_site(settings: Settings, limits: Limits, root: Path | None = None) -> 
         "/privacy": html(
             "privacy.html",
             Meta(f"Privacy - {name}", f"What the {name} server stores and how to delete it.", "/privacy"),
-            updated=UPDATED,
+            updated=PRIVACY_UPDATED,
         ),
         "/terms": html(
             "terms.html",
             Meta(f"Terms - {name}", f"The terms for the {name} app and its hosted server.", "/terms"),
-            updated=UPDATED,
+            updated=TERMS_UPDATED,
             apple_eula=APPLE_EULA,
         ),
         "/support": html(

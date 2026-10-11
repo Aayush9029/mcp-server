@@ -4,6 +4,7 @@ Most tests build the site from a small repository in a temporary folder, so they
 """
 
 import base64
+import hashlib
 import json
 import re
 from collections.abc import AsyncGenerator, Callable
@@ -20,6 +21,8 @@ from mcp_client_server.config import Settings
 from mcp_client_server.limits import Limits
 from mcp_client_server.site import site_router
 from mcp_client_server.site.docs import ORDER
+from scripts import site_images
+from tests.support import Api
 
 type Serve = Callable[..., AbstractAsyncContextManager[httpx2.AsyncClient]]
 
@@ -30,6 +33,16 @@ SHORT = "public, max-age=300"
 DAY = "public, max-age=86400"
 IMMUTABLE = "public, max-age=31536000, immutable"
 REAL_DOCS = Path(__file__).resolve().parents[1] / "docs"
+IMAGES = Path(__file__).resolve().parents[1] / "src" / "mcp_client_server" / "site" / "static" / "img"
+LAYOUTS = ("ring", "bar", "note", "minimal")
+# The SHA-256 of each official brand file, as the asset catalog of the app lists it.
+BRAND_FILES = {
+    "brand-claude": "6d53db4be375e899c937c26cf16684a80d6e869b1928d72b37748bef2560e219",
+    "brand-openai": "75c1e9fffa5e8c437bec1d67197a73992bca45d166c6ff23215185dea8fae92a",
+    "brand-cursor": "c483c02f78eb2619778fdd959e72a9adfac4844854472cd2653d4cbfd60e4d71",
+}
+# The start page gives the number of tools as a word.
+NUMBER_WORDS = {9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen"}
 
 OVERVIEW = """# Overview <of> the service
 
@@ -213,8 +226,9 @@ async def test_each_route_has_its_content_type_and_cache_lifetime(
 async def test_assets_have_a_content_hash_in_the_url_and_never_expire(site: httpx2.AsyncClient) -> None:
     home = await page(site, "/")
     urls = set(re.findall(r'(?:src|href)="(/static/[^"]+)"', home))
+    urls |= set(re.findall(r"url\('(/static/[^']+)'\)", home))
     kinds = {url.rsplit(".", 1)[-1] for url in urls}
-    assert {"css", "js", "avif", "png"} <= kinds
+    assert {"css", "js", "avif", "png", "svg"} <= kinds
     for url in urls:
         assert re.search(r"\.[0-9a-f]{12}\.\w+$", url), url
         response = await site.get(url)
@@ -250,6 +264,128 @@ async def test_images_are_lazy_and_have_a_size_and_a_text(site: httpx2.AsyncClie
     for image in images:
         assert re.search(r'\bwidth="\d+" height="\d+"', image), image
         assert re.search(r'\balt="[^"]*"', image), image
+
+
+def image_names(html: str) -> list[str]:
+    """The stable names of the images in a piece of HTML, without the folder, the hash, and the suffix."""
+    return re.findall(r'<img\b[^>]*\bsrc="/static/img/([\w-]+)\.[0-9a-f]{12}\.\w+"', html)
+
+
+async def test_each_device_frame_holds_a_capture_of_the_app(site: httpx2.AsyncClient) -> None:
+    home = await page(site, "/")
+    frames = re.findall(r'<div class="device-screen">(.*?)</div>', home, re.DOTALL)
+    assert len(frames) == home.count('class="device ')
+    for frame in frames:
+        assert image_names(frame), frame
+        assert text_of(frame) == "", "A frame holds only images."
+    # No part of the page is a drawing of the app.
+    assert 'role="img"' not in home
+    assert "Illustration" not in home
+
+    by_section = {
+        match.group(1): image_names(match.group(0))
+        for match in re.finditer(r'<section class="[^"]*" id="([\w-]+)".*?(?=<section\b|</main>)', home, re.DOTALL)
+    }
+    assert image_names(part(home, "section")) == ["iphone-task-detail", "iphone-tasks", "iphone-keys"]
+    assert by_section["tasks"] == ["ipad-task-detail", "iphone-tasks"]
+    assert by_section["questions"] == [
+        "iphone-question-lock-screen",
+        "iphone-question-notification",
+        "iphone-question-sheet",
+        "watch-question",
+    ]
+    assert by_section["live-activities"] == [f"iphone-live-{layout}" for layout in LAYOUTS] + [
+        f"island-{layout}" for layout in LAYOUTS
+    ]
+    assert by_section["everywhere"] == [
+        "iphone-widgets",
+        "iphone-widgets-medium",
+        "watch-notification",
+        "watch-task",
+        "iphone-shortcuts",
+        "ipad-task-detail",
+    ]
+    assert by_section["privacy"] == ["iphone-keys", "iphone-settings"]
+    assert by_section["open-source"] == []
+
+
+async def test_the_highlights_have_one_capture_for_each_of_the_four_cards(site: httpx2.AsyncClient) -> None:
+    home = await page(site, "/")
+    gallery = re.search(r'<ul class="gallery".*?</ul>', home, re.DOTALL)
+    assert gallery
+    cards = re.findall(r'<li class="card[^"]*">(.*?)</li>', gallery.group(0), re.DOTALL)
+    captions = [text_of(part(card, "p")) for card in cards]
+    assert captions == [
+        "One inbox for the tasks of every agent.",
+        "Answer a question from the notification.",
+        "Live Activities with the layout, symbol, and color you choose.",
+        "Widgets, Siri, Shortcuts, and Apple Watch.",
+    ]
+    assert [image_names(card) for card in cards] == [
+        ["iphone-tasks"],
+        ["iphone-question-notification"],
+        ["iphone-live-style"],
+        ["iphone-widgets", "watch-task"],
+    ]
+
+
+async def test_the_layout_picker_has_a_pair_of_captures_for_each_layout(site: httpx2.AsyncClient) -> None:
+    home = await page(site, "/")
+    choices = re.findall(r'<input type="radio" name="layout" value="(\w+)"( checked)?><span>([^<]+)</span>', home)
+    assert choices == [
+        ("ring", " checked", "Progress Ring"),
+        ("bar", "", "Progress Bar"),
+        ("note", "", "Status Note"),
+        ("minimal", "", "Minimal"),
+    ]
+    for layout, _, name in choices:
+        for image in (f"iphone-live-{layout}", f"island-{layout}"):
+            match = re.search(
+                rf'<img class="live-shot live-shot-{layout}" src="(/static/img/{image}\.[^"]+)" alt="([^"]+)"', home
+            )
+            assert match, image
+            assert name in match.group(2)
+            response = await site.get(match.group(1))
+            assert response.headers["content-type"] == "image/avif"
+    stylesheet = re.search(r'href="(/static/site\.[^"]+\.css)"', home)
+    assert stylesheet
+    css = await page(site, stylesheet.group(1))
+    for layout in LAYOUTS[1:]:
+        assert f'#live-activities:has(input[value="{layout}"]:checked) .live-shot-{layout}' in css
+
+
+async def test_the_brand_marks_are_the_official_files_and_have_a_text_label(site: httpx2.AsyncClient) -> None:
+    home = await page(site, "/")
+    tab_list = re.search(r'<div class="tab-list".*?</div>', home, re.DOTALL)
+    assert tab_list
+    tabs = dict(re.findall(r'id="tab-([\w-]+)"[^>]*>(.*?)</button>', tab_list.group(0), re.DOTALL))
+    assert {name: text_of(tab) for name, tab in tabs.items()} == {
+        "claude-code": "Claude Code",
+        "codex": "Codex",
+        "cursor": "Cursor",
+        "other": "Other clients",
+    }
+    file = r"(/static/img/(brand-\w+)\.[0-9a-f]{12}\.svg)"
+    mask = r"<span class=\"mark mark-mask mark-%s\" style=\"--mark: url\('" + file + r"'\)\""
+    marks = {
+        "claude-code": ("brand-claude", r'<img class="mark" src="' + file + r'" width="18" height="18" alt=""'),
+        "codex": ("brand-openai", mask % "openai"),
+        "cursor": ("brand-cursor", mask % "cursor"),
+    }
+    for tab, (name, pattern) in marks.items():
+        match = re.match(pattern, tabs[tab])
+        assert match, tabs[tab]
+        assert match.group(2) == name
+        response = await site.get(match.group(1))
+        assert response.headers["content-type"] == "image/svg+xml"
+        assert hashlib.sha256(response.content).hexdigest() == BRAND_FILES[name]
+    assert "mark" not in tabs["other"]
+
+
+def test_the_image_script_makes_each_image_of_the_site_and_no_other() -> None:
+    made = {name for name, _, _ in site_images.outputs()}
+    assert made == {path.name for path in IMAGES.iterdir()}
+    assert {name for name in made if name.startswith("brand-")} == {f"{name}.svg" for name in BRAND_FILES}
 
 
 async def test_a_docs_page_has_highlighted_code_tables_anchors_and_copy_buttons(site: httpx2.AsyncClient) -> None:
@@ -359,7 +495,17 @@ async def test_the_real_docs_are_all_on_the_site_of_the_application(client: http
         assert '<article class="docs-article">' in html
         assert await page(client, f"/docs/{slug}.md") == (REAL_DOCS / f"{slug}.md").read_text(encoding="utf-8")
     assert (await client.get("/health")).json() == {"status": "ok", "store": "ok"}
-    assert "<h1" in await page(client, "/")
+    home = await page(client, "/")
+    assert "<h1" in home
+    assert '<a href="/docs/inbox"><span>Inbox</span>' in home
+
+
+async def test_the_start_page_gives_the_number_of_tools_that_an_agent_gets(
+    client: httpx2.AsyncClient, api: Api
+) -> None:
+    _, key, _ = await api.agent()
+    tools = (await api.rpc(key, "tools/list")).json()["result"]["tools"]
+    assert f"An agent gets {NUMBER_WORDS[len(tools)]} tools." in await page(client, "/")
 
 
 async def test_product_strings_come_from_the_settings_and_are_escaped(serve: Serve) -> None:
@@ -488,7 +634,7 @@ async def test_the_cursor_button_carries_the_server_and_a_key_placeholder(site: 
 async def test_each_agent_has_its_setup_commands(site: httpx2.AsyncClient) -> None:
     home = await page(site, "/")
     tab = r'<button type="button" class="tab" role="tab" id="tab-([\w-]+)" aria-controls="panel-\1"'
-    tabs = re.findall(tab + r' aria-selected="(\w+)">([^<]+)</button>', home)
+    tabs = re.findall(tab + r' aria-selected="(\w+)">.*?<span>([^<]+)</span></button>', home)
     assert tabs == [
         ("claude-code", "true", "Claude Code"),
         ("codex", "false", "Codex"),
@@ -534,20 +680,39 @@ async def test_a_repository_without_docs_and_manifests_still_has_a_site(serve: S
 
 
 async def test_the_privacy_page_says_what_the_server_stores_and_for_how_long(serve: Serve) -> None:
-    limits = Limits(closed_task_ttl_seconds=30 * 86400, closed_question_ttl_seconds=7 * 86400)
+    limits = Limits(
+        closed_task_ttl_seconds=30 * 86400,
+        max_closed_tasks_per_key=1500,
+        closed_question_ttl_seconds=7 * 86400,
+        unread_inbox_ttl_seconds=3 * 86400,
+        read_inbox_ttl_seconds=12 * 3600,
+        activity_log_entries=150,
+        activity_log_ttl_seconds=5 * 86400,
+    )
     async with serve(limits=limits) as http:
         text = text_of(part(await page(http, "/privacy"), "article"))
     for fact in (
         "An anonymous account ID.",
         "the device model, the OS version, the app version, and the push tokens",
         "a SHA-256 hash of the secret, your label",
-        "the name and version of the last MCP client",
-        "Your tasks, questions, and answers.",
+        "the name and version of the last MCP client that used it, and the last host name that an agent sent with it",
+        "Your tasks, questions, answers, and messages.",
+        "The installer and the agent hooks send the short host name of the computer where an agent runs",
+        "puts the host name on each task that the agent makes and on each entry of the request log",
+        "A request log for each API key.",
+        "the time, the tool or the route, the result (success, or an error code with a short error summary)",
+        "the duration, the name and version of the client, and the host name",
+        "The log never has the text of a task, a question, an answer, a message, or a notification",
+        "and it never has a credential.",
         "No name, no email address",
         "no tracking, no ads, and no third-party analytics",
-        "is deleted 30 days after its last change",
+        "is deleted 30 days after its last change. The server keeps the newest 1,500 such tasks of a key.",
         "is deleted 7 days after it closed",
+        "A message to an agent is deleted 3 days after it was sent, or 12 hours after the agent read it.",
+        "An entry of the request log is deleted 5 days after the request.",
+        "The server keeps the newest 150 entries of a key.",
         "Delete a task, a key, or the full account in the app.",
+        "The server then removes its tasks, its questions, its messages, and its request log.",
         "DELETE /v1/account",
         "help@example.com",
     ):
@@ -558,6 +723,8 @@ async def test_the_privacy_page_says_what_the_server_stores_and_for_how_long(ser
         text = text_of(part(await page(http, "/privacy"), "article"))
     assert "Apple's App Attest service" in text
     assert "is deleted 90 days after its last change" in text
+    assert "An entry of the request log is deleted 7 days after the request." in text
+    assert "The server keeps the newest 200 entries of a key." in text
 
 
 async def test_the_terms_point_to_the_apple_agreement_and_support_shows_the_address(site: httpx2.AsyncClient) -> None:
@@ -584,6 +751,7 @@ async def test_the_legal_pages_are_in_the_footer_and_not_in_the_navigation(site:
         ("https://github.com/example/relay-server", "Source code"),
         ("/llms.txt", "llms.txt"),
     ]
+    assert "Apple" not in text_of(part(html, "footer"))
 
 
 async def test_share_tags_the_icon_and_the_files_for_crawlers(site: httpx2.AsyncClient) -> None:

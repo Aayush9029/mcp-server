@@ -27,6 +27,7 @@ type Json = dict[str, Any]
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "relaydeck"
 SCRIPT = PLUGIN / "hooks" / "inbox.sh"
+VERSION = re.findall(r"^VERSION=(\S+)$", SCRIPT.read_text(), re.MULTILINE)[0]
 
 KEY = "mck_" + "H0okT3st" * 5
 OTHER_KEY = "mck_" + "0therKey" * 5
@@ -201,7 +202,7 @@ def test_a_session_start_gets_the_unread_items(hook: Hook) -> None:
 
     assert hook.inbox_requests() == ["/v1/inbox?limit=5"]
     assert hook.stub.requests[0]["authorization"] == f"Bearer {KEY}"
-    assert hook.stub.requests[0]["agent"] == "relaydeck-hook/1.1.0 (claude)"
+    assert hook.stub.requests[0]["agent"] == f"relaydeck-hook/{VERSION} (claude)"
     assert hook.stub.keys[KEY].unread() == []
 
 
@@ -222,7 +223,7 @@ def test_each_agent_gets_its_own_event_name(hook: Hook, agent: str, event: str, 
     done = hook.run(agent, event)
     assert done.json["hookSpecificOutput"]["hookEventName"] == name
     assert item_lines(context_of(done)) == [("1", "task_changed", f"the person, task {TASK}", "Status: cancelled")]
-    assert hook.stub.requests[0]["agent"] == f"relaydeck-hook/1.1.0 ({agent})"
+    assert hook.stub.requests[0]["agent"] == f"relaydeck-hook/{VERSION} ({agent})"
 
 
 def test_cursor_gets_its_own_format(hook: Hook) -> None:
@@ -505,6 +506,65 @@ def test_each_agent_uses_only_its_own_key(hook: Hook) -> None:
     assert hook.stub.requests == []
 
 
+# ------------------------------------------------------------------ the name of the machine
+
+
+def with_hostname(hook: Hook, name: str) -> None:
+    """Puts a `hostname` command that gives this name first in PATH."""
+    fake_bin = hook.root / "host-bin"
+    fake_bin.mkdir()
+    command = fake_bin / "hostname"
+    command.write_text(f"#!/bin/sh\necho {name}\n")
+    command.chmod(0o755)
+    hook.env["PATH"] = f"{fake_bin}{os.pathsep}{hook.env['PATH']}"
+
+
+def test_each_request_names_the_machine(hook: Hook) -> None:
+    with_hostname(hook, "studio")
+    hook.stub.add_item(KEY, "message", "With a host name.")
+    assert "With a host name." in hook.run("claude", "start").out
+    assert hook.stub.requests[-1]["host"] == "studio"
+    hook.run("claude", "stop", given={"session_id": "s", "stop_hook_active": False})
+    assert hook.stub.requests[-1]["host"] == "studio"
+
+    hook.run("claude", "prompt", env={"RELAYDECK_HOST": "Work Mac"})
+    assert hook.stub.requests[-1]["host"] == "Work-Mac"
+    both = {"RELAYDECK_HOST": "from-the-environment", "CLAUDE_PLUGIN_OPTION_HOST_NAME": "from-the-option"}
+    hook.run("claude", "prompt", env=both)
+    assert hook.stub.requests[-1]["host"] == "from-the-option"
+
+    # A name cannot add a header or end the header list of curl.
+    hook.run("claude", "prompt", env={"CLAUDE_PLUGIN_OPTION_HOST_NAME": 'a"\nheader = "X-Evil: 1' + "b" * 80})
+    last = hook.stub.requests[-1]
+    assert last["host"] == ("a-header-X-Evil-1" + "b" * 80)[:64]
+    assert last["authorization"] == f"Bearer {KEY}"
+    assert len(hook.stub.requests) == 5
+
+
+def test_the_files_of_an_agent_give_the_host_name(hook: Hook) -> None:
+    with_hostname(hook, "studio")
+    sent = {"Authorization": f"Bearer {KEY}", "X-Relaydeck-Host": "from-the-file"}
+    gemini = hook.home / ".gemini" / "settings.json"
+    gemini.parent.mkdir()
+    gemini.write_text(json.dumps({"mcpServers": {"tasks": {"httpUrl": f"{hook.server.url}/mcp", "headers": sent}}}))
+    cursor = hook.home / ".cursor" / "mcp.json"
+    cursor.parent.mkdir()
+    cursor.write_text(json.dumps({"mcpServers": {"tasks": {"url": f"{hook.server.url}/mcp", "headers": sent}}}))
+    config = hook.home / ".codex" / "config.toml"
+    config.parent.mkdir()
+    header = f'{{ Authorization = "Bearer {KEY}", X-Relaydeck-Host = "from-the-file" }}'
+    config.write_text(f'[mcp_servers.tasks]\nurl = "{hook.server.url}/mcp"\nhttp_headers = {header}\n')
+    for agent in ("gemini", "cursor", "codex"):
+        hook.run(agent, "start")
+        assert hook.stub.requests[-1]["host"] == "from-the-file", agent
+        assert hook.stub.requests[-1]["authorization"] == f"Bearer {KEY}"
+
+    # Without a name in the file, the hook uses the host name of the machine.
+    config.write_text(f'[mcp_servers.tasks]\nurl = "{hook.server.url}/mcp"\nbearer_token_env_var = "TASKS_API_KEY"\n')
+    hook.run("codex", "start", env={"TASKS_API_KEY": KEY})
+    assert hook.stub.requests[-1]["host"] == "studio"
+
+
 # ------------------------------------------------------------------ the watch of Claude Code
 
 
@@ -700,11 +760,16 @@ def test_the_codex_plugin_keeps_the_layout_that_runs_its_hooks() -> None:
 def test_the_plugin_manifests_agree() -> None:
     claude = read(PLUGIN / ".claude-plugin" / "plugin.json")
     codex = read(PLUGIN / ".codex-plugin" / "plugin.json")
-    assert claude["version"] == codex["version"] == re.findall(r"^VERSION=(\S+)$", SCRIPT.read_text(), re.MULTILINE)[0]
+    assert claude["version"] == codex["version"] == VERSION
     assert claude["mcpServers"]["tasks"]["url"] == codex["mcpServers"]["tasks"]["url"]
     # The site reads the first option as the option for the API key.
     assert next(iter(claude["userConfig"])) == "api_key"
     assert claude["userConfig"]["api_key"]["sensitive"] is True
+    # The installer saves the host name in this option, and Claude Code puts it into the header.
+    assert claude["userConfig"]["host_name"]["type"] == "string"
+    assert claude["mcpServers"]["tasks"]["headers"]["X-Relaydeck-Host"] == "${user_config.host_name}"
+    # Codex takes the value of a header only from an environment variable, and leaves the header out without one.
+    assert codex["mcpServers"]["tasks"]["env_http_headers"] == {"X-Relaydeck-Host": "RELAYDECK_HOST"}
     assert claude["userConfig"]["idle_watch_minutes"]["default"] == int(
         re.findall(r"^WATCH_MINUTES=(\d+)$", SCRIPT.read_text(), re.MULTILINE)[0]
     )

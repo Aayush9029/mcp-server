@@ -1,6 +1,6 @@
 {
   "name": "relaydeck",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Two-way tasks between your agent and the Relaydeck app on iPhone, iPad, and Apple Watch: the agent reports its work, and it gets your tasks, answers, and messages.",
   "author": {
     "name": "Aayush9029",
@@ -14,7 +14,10 @@
     "tasks": {
       "type": "http",
       "url": "https://relaydeck.onrender.com/mcp",
-      "bearer_token_env_var": "TASKS_API_KEY"
+      "bearer_token_env_var": "TASKS_API_KEY",
+      "env_http_headers": {
+        "X-Relaydeck-Host": "RELAYDECK_HOST"
+      }
     }
   },
   "skills": "./skills/",

@@ -11,8 +11,10 @@
     <ul>
       <li><strong>An anonymous account ID.</strong> The app gets a random ID and a secret token the first time it opens. The server keeps only a SHA-256 hash of the token.</li>
       <li><strong>Your devices.</strong> For each device: a device ID that the app makes, the platform, the device model, the OS version, the app version, and the push tokens that Apple gives the app.</li>
-      <li><strong>Your API keys.</strong> For each key: a SHA-256 hash of the secret, your label, the first and last characters of the secret so that you can recognize it, the time of the last use, and the name and version of the last MCP client that used it. The server cannot show a secret again.</li>
-      <li><strong>Your tasks, questions, and answers.</strong> The text that your agents and you write: task titles, descriptions, statuses, priorities, progress, and notes, the questions that an agent asks with their choices, and the answers that you give.</li>
+      <li><strong>Your API keys.</strong> For each key: a SHA-256 hash of the secret, your label, the first and last characters of the secret so that you can recognize it, the time of the last use, the name and version of the last MCP client that used it, and the last host name that an agent sent with it. The server cannot show a secret again.</li>
+      <li><strong>Your tasks, questions, answers, and messages.</strong> The text that your agents and you write: task titles, descriptions, statuses, priorities, progress, and notes, the questions that an agent asks with their choices, the answers that you give, and the messages that you and your agents send.</li>
+      <li><strong>The host name of the computer of an agent.</strong> The installer and the agent hooks send the short host name of the computer where an agent runs, so that the app can show where each agent runs. The server keeps the most recent host name with the API key, and puts the host name on each task that the agent makes and on each entry of the request log. The installer option <code>--host</code> sends a name of your choice as an alternative.</li>
+      <li><strong>A request log for each API key.</strong> For each request that an agent makes with a key, the server keeps these items: the time, the tool or the route, the result (success, or an error code with a short error summary), the duration, the name and version of the client, and the host name. The app shows this log, so that you can see what went wrong. The log never has the text of a task, a question, an answer, a message, or a notification, and it never has a credential.</li>
       {% if uses_app_attest %}
       <li><strong>An app attestation.</strong> When the app makes your account, it sends a proof from Apple's App Attest service that the request comes from the real app. The server keeps the key ID, the public key, and the counter of that proof with the account. They do not say who you are.</li>
       {% endif %}
@@ -36,13 +38,15 @@
 
     <h2 id="retention">How long data stays</h2>
     <ul>
-      <li>A task with the status done or cancelled is deleted {{ task_days }} days after its last change.</li>
+      <li>A task with the status done or cancelled is deleted {{ task_days }} days after its last change. The server keeps the newest {{ closed_tasks }} such tasks of a key.</li>
       <li>A question that is answered, expired, or cancelled is deleted {{ question_days }} days after it closed.</li>
+      <li>A message to an agent is deleted {{ inbox_days }} days after it was sent, or {{ inbox_read_hours }} hours after the agent read it.</li>
+      <li>An entry of the request log is deleted {{ log_days }} days after the request. The server keeps the newest {{ log_entries }} entries of a key.</li>
       <li>All other data stays until you delete it.</li>
     </ul>
 
     <h2 id="delete">How to delete your data</h2>
-    <p>Delete a task, a key, or the full account in the app. A deleted key takes all its tasks and questions with it. A deleted account takes its devices, keys, tasks, questions, and answers with it, immediately. You can also send <code>DELETE /v1/account</code> with your account token.</p>
+    <p>Delete a task, a key, or the full account in the app. A deleted key stops at once. The server then removes its tasks, its questions, its messages, and its request log. A deleted account stops at once. The server then removes its devices, its keys, and all the data of those keys. You can also send <code>DELETE /v1/account</code> with your account token.</p>
 
     <h2 id="contact">Contact</h2>
     <p><a href="mailto:{{ support_email }}">{{ support_email }}</a></p>

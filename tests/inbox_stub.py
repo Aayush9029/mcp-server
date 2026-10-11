@@ -147,6 +147,7 @@ class Handler(BaseHTTPRequestHandler):
                 "path": self.path,
                 "authorization": authorization,
                 "agent": self.headers.get("User-Agent"),
+                "host": self.headers.get("X-Relaydeck-Host"),
             }
         )
         time.sleep(stub.delay)

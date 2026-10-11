@@ -1,7 +1,7 @@
 {
   "name": "relaydeck",
   "displayName": "Relaydeck",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Two-way tasks between your agent and the Relaydeck app on iPhone, iPad, and Apple Watch: the agent reports its work, and it gets your tasks, answers, and messages.",
   "author": {
     "name": "Aayush9029",
@@ -26,6 +26,11 @@
       "default": 480,
       "min": 0,
       "max": 1440
+    },
+    "host_name": {
+      "type": "string",
+      "title": "Name of this machine",
+      "description": "The Relaydeck app shows this name for the agent. Use the short host name of this machine, for example work-mac."
     }
   },
   "mcpServers": {
@@ -33,7 +38,8 @@
       "type": "http",
       "url": "https://relaydeck.onrender.com/mcp",
       "headers": {
-        "Authorization": "Bearer ${user_config.api_key}"
+        "Authorization": "Bearer ${user_config.api_key}",
+        "X-Relaydeck-Host": "${user_config.host_name}"
       }
     }
   }

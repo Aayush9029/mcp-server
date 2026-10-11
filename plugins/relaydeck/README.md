@@ -27,7 +27,7 @@ The hooks start with the next session. The plugin was tested with Claude Code 2.
 
 ## Codex
 
-Codex reads the API key from the `TASKS_API_KEY` environment variable. Set the variable in your shell profile, then run these commands.
+Codex reads the API key from the `TASKS_API_KEY` environment variable. Set the variable in your shell profile, then run these commands. If you also set `RELAYDECK_HOST`, for example to the output of `hostname -s`, the app shows that name for the agent.
 
 ```bash
 codex plugin marketplace add Aayush9029/mcp-server
@@ -70,11 +70,15 @@ The other agents that the installer supports have no hook that can run this scri
 |------|-------|---------|
 | `api_key` | Claude Code plugin option | The API key |
 | `idle_watch_minutes` | Claude Code plugin option | Minutes to listen while the agent waits. Default 480. The value 0 turns the wake off. |
+| `host_name` | Claude Code plugin option | The name of this machine in the app. The installer sets it to the short host name. |
 | `TASKS_API_KEY` | Environment, Codex | The API key |
+| `RELAYDECK_HOST` | Environment | The name of this machine in the app, for Codex and for the hooks. Without it, the hooks send the short host name. |
 | `RELAYDECK_URL` | Environment | A different server for the hooks, for example `http://localhost:8000` |
 
 ## Data
 
-The plugin sends your API key and the tool calls of the agent to `relaydeck.onrender.com`. The hook script sends your API key to the same server and reads your inbox. It sends no other data.
+The plugin sends your API key, the name of this machine, and the tool calls of the agent to `relaydeck.onrender.com`. The hook script sends your API key and the name of this machine to the same server and reads your inbox. It sends no other data.
+
+The name of the machine goes in the header `X-Relaydeck-Host`. The app shows it, so you see where an agent runs. The name has only letters, digits, `.`, `_`, and `-`.
 
 The script gives the key to `curl` through standard input. It does not print the key, and it does not write the key to a file. It keeps the IDs of the items that each session got in the data folder of the plugin, and it removes them after 7 days.
