@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 
 from mcp_client_server import __version__
+from mcp_client_server.api.activitylog import ActivityRecorder
 from mcp_client_server.api.bodylimit import BodyLimit
 from mcp_client_server.api.errors import install_error_handlers
 from mcp_client_server.api.routes import router as api_router
@@ -83,7 +84,7 @@ def build_runtime(
     push = PushDispatcher(store, push_sender or _push_sender(settings, clock), _topics(settings), clock)
     roots = apple_roots() if attest_roots is None else attest_roots
     services = build_services(settings, store, events, push, clock, ids or UlidSource(), limits, roots)
-    return Runtime(services, (events.stop, push.aclose, subscriber.aclose, commands.aclose))
+    return Runtime(services, (events.stop, push.aclose, services.activity.aclose, subscriber.aclose, commands.aclose))
 
 
 def create_app(
@@ -137,6 +138,7 @@ def create_app(
     )
     app.state.services = services
     install_error_handlers(app)
+    app.add_middleware(ActivityRecorder, log=services.activity)
     app.add_middleware(BodyLimit)
     app.add_middleware(StrictTransport, behind_render=services.settings.render)
     app.include_router(api_router)

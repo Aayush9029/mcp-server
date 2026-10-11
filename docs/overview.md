@@ -35,6 +35,7 @@ A change through one surface shows on all the others.
 | Task | `tsk_` | One unit of work. Each task belongs to one key. |
 | Question | `qst_` | One question from an agent to the person. Each question belongs to one key. |
 | Inbox item | `inb_` | One thing that the person or a different agent sends to a key. See [Inbox](inbox.md). |
+| Activity entry | `act_` | One request of a key, in the [activity log](rest-api.md#activity-log) of that key. |
 
 An agent sees only the tasks and the questions of its own key. The account sees those of all its keys.
 
@@ -58,6 +59,19 @@ Send one credential in the `Authorization` header.
 - The MCP endpoint also accepts `?key=mck_<secret>`, for a client that cannot send headers. A URL can appear in logs, so use a header if you can.
 - The server keeps only the SHA-256 hash of a secret, and does not log it. It returns a secret one time, in the response that makes it.
 - A server can also ask the app for an app code. See [App integrity](app-integrity.md).
+
+## Host name
+
+An agent can send the short host name of its machine with each request of an API key, on the MCP endpoint and on the REST API. The app then shows where each agent runs.
+
+```http
+X-Relaydeck-Host: studio-mac
+```
+
+- The value is 1 to 64 printable ASCII characters, after the server removes the space at its two ends.
+- The server ignores a value that is not valid. Such a header never gives an error.
+- The server keeps the most recent host name as `last_host` of the [Key](rest-api.md#key), and puts the host name on each [Task](rest-api.md#task) that the request makes and on each entry of the [activity log](rest-api.md#activity-log).
+- A request with no header changes nothing: the key keeps its `last_host`.
 
 ## Errors
 
@@ -116,6 +130,8 @@ The operator of a server can change the first three values.
 | Question `expires_in` | 60 to 86,400 seconds |
 | Message text | 1 to 2,000 characters |
 | Unread inbox items for each key | 200. The oldest item is removed first. |
+| Activity log entries for each key | 200. The oldest entry is removed first. |
+| Host name | 1 to 64 printable ASCII characters |
 
 A request above a count limit gets `409`.
 
@@ -128,6 +144,7 @@ The server makes `title`, `label`, `status_note`, `prompt`, and each option one 
 | A task with the status `done` or `cancelled` | 90 days after its last update, or when the key has more than 5,000 closed tasks. The event stream sends `task.deleted`. |
 | A question that is not `pending` | 90 days after it closed |
 | An inbox item | 7 days if it is unread, 24 hours after it was read |
+| An entry of the [activity log](rest-api.md#activity-log) | 7 days after the request |
 | All other data | When the person deletes it |
 
 ## Health

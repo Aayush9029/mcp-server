@@ -51,11 +51,13 @@ The Apple app and scripts use the routes under `/v1`. Read [Overview](overview.m
   "created_at": 1760000000.0,
   "last_used_at": 1760112300.9,
   "last_client": { "name": "claude-code", "version": "2.1.290" },
+  "last_host": "studio-mac",
   "counts": { "todo": 3, "in_progress": 1, "done": 12, "cancelled": 0 }
 }
 ```
 
 - `last_client` is the MCP `clientInfo` of the most recent MCP request. It is `null` until an MCP client uses the key.
+- `last_host` is the most recent [host name](overview.md#host-name) that a request of the key sent. It is `null` until a request sends one.
 - `last_used_at` changes one time in one minute at most.
 
 ### Task
@@ -75,7 +77,8 @@ The Apple app and scripts use the routes under `/v1`. Read [Overview](overview.m
   "created_at": 1760112000.412,
   "updated_at": 1760112300.9,
   "completed_at": null,
-  "seen_at": 1760112010.2
+  "seen_at": 1760112010.2,
+  "host": "studio-mac"
 }
 ```
 
@@ -89,6 +92,9 @@ The Apple app and scripts use the routes under `/v1`. Read [Overview](overview.m
 | `source` | `agent` if an API key made the task, `app` if the account made it |
 | `completed_at` | Set when `status` becomes `done`. `null` when the status is a different one. |
 | `seen_at` | When the agent of the key first got the task, or `null`. See [Inbox](inbox.md#task-field). |
+| `host` | The [host name](overview.md#host-name) that came with the agent request that made the task. `null` for a task from the app, and when the agent sent no host name. It does not change later. |
+
+A task from before the fields `seen_at` and `host` does not have them in its JSON until its next change. Read a missing field as `null`.
 
 ### Question
 
@@ -157,7 +163,8 @@ The body of `PUT` has the fields of the [Device](#device) without `id` and `upda
 | `GET` | `/v1/keys` | account | | `200 {"keys": [Key]}`, newest first |
 | `POST` | `/v1/keys` | account | `{"label": "Cursor"}` | `201 {"key": Key, "secret": "mck_..."}` |
 | `PATCH` | `/v1/keys/{key_id}` | account | `{"label": "Cursor (work)"}` | `200 Key` |
-| `DELETE` | `/v1/keys/{key_id}` | account | | `204`. Deletes the key, its tasks, its questions, and its inbox. |
+| `DELETE` | `/v1/keys/{key_id}` | account | | `204`. Deletes the key, its tasks, its questions, its inbox, and its activity log. |
+| `GET` | `/v1/keys/{key_id}/activity` | account | | `200 {"items": [Entry], "next_cursor": null}`. See [Activity log](#activity-log). |
 
 A deleted key, or a deleted account, is unusable when the response comes: its credential is refused, and no route returns its data. The server removes the data itself in small steps after that, and finishes a deletion that stopped.
 
@@ -284,6 +291,73 @@ If two answers arrive at the same time, one gets `200` and the other gets `409`.
 | `GET` | `/v1/agents` | API key | `200 {"agents": [Agent]}` |
 
 When the person creates, changes, or deletes a task of a key with the account token, or answers a question, the server adds an item to the inbox of that key. See [Inbox](inbox.md) for the objects, the query parameters, and the rules.
+
+## Activity log
+
+The server keeps the last 200 requests of each API key for 7 days. The app shows them, so that the person can see what went wrong, copy an entry, and give it to the agent.
+
+`GET /v1/keys/{key_id}/activity` returns the entries of one key of the account, newest first. A key of a different account gives `404`. The log has no event on the event stream: get it when the person opens it.
+
+| Query parameter | Meaning |
+|-----------------|---------|
+| `limit` | 1 to 100. The default is 50. |
+| `cursor` | The `next_cursor` of the previous page. `next_cursor` is `null` on the last page. |
+
+### Entry
+
+```json
+{
+  "id": "act_01jb2q7m3k",
+  "at": 1760112300.9,
+  "surface": "mcp",
+  "action": "update_task",
+  "status": "error",
+  "code": "not_found",
+  "message": "Task not found.",
+  "duration_ms": 4,
+  "client": { "name": "claude-code", "version": "2.1.290" },
+  "host": "studio-mac"
+}
+```
+
+| Field | Values |
+|-------|--------|
+| `at` | When the request came |
+| `surface` | `mcp` or `rest` |
+| `action` | See the table below |
+| `status` | `ok` or `error` |
+| `code` | The `code` of the [error](overview.md#errors), or `null` for `ok` |
+| `message` | A short summary of the error, or `null` |
+| `duration_ms` | The time from the request to the end of the response, in milliseconds. For a call that waits, it has the time of the wait. |
+| `client` | The MCP `clientInfo` of the request, or `null`. A REST request has none. |
+| `host` | The [host name](overview.md#host-name) of the request, or `null` |
+
+| Request | `action` |
+|---------|----------|
+| An MCP tool call | The tool name, for example `create_task` |
+| A call of a tool that the server does not have | `tools/call` |
+| A different MCP method | The method name, for example `tools/list` or `initialize` |
+| An MCP method that the server does not have | `unknown method` |
+| A request that the MCP endpoint refuses before it reads the method | `POST /mcp` |
+| A REST request | The method and the path of the route, for example `PATCH /v1/tasks/{task_id}`. The path has the names of its parameters, never an ID. |
+
+`message` is text that the server wrote, for example `Task not found.` For a request that is not valid, it has the names of the fields and not their values, for example `Invalid fields: priority, title.` A tool error has the same `code` that the REST API gives for that error.
+
+### What has an entry
+
+One request of an API key has one entry, also a request that failed and a request above the rate limit. These requests have no entry:
+
+- A request with an account token, or with no valid credential.
+- A request that the server refuses before it reads the credential: an unknown path, a REST body that is not JSON, or a body above the size limit.
+- `GET /health`, the event stream, and the pages of the website.
+- An MCP notification.
+- A call that only waited: a read of the inbox with `wait` or `wait_seconds` that ended with no item, and a read of a question that is still `pending` after its `wait`. A call that waited and then got a result has one entry.
+
+The server writes an entry after it sends the response. Thus an entry can be absent for a moment after its request.
+
+### What the log stores
+
+The log has only the fields of the Entry. It never has the text of a task, a question, an answer, a message, or a notification, and it never has a credential. The server deletes an entry after 7 days, keeps the newest 200 entries of a key, and deletes the log with its key and with the account.
 
 ## Live Activities
 

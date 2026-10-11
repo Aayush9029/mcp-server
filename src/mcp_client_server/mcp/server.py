@@ -12,12 +12,28 @@ from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp_types import CLIENT_INFO_META_KEY, CallToolResult, TextContent, ToolAnnotations
+from mcp.shared.exceptions import MCPError
+from mcp_types import (
+    CLIENT_INFO_META_KEY,
+    INTERNAL_ERROR,
+    INVALID_PARAMS,
+    METHOD_NOT_FOUND,
+    CallToolResult,
+    TextContent,
+    ToolAnnotations,
+)
 from pydantic import BaseModel, BeforeValidator, Field, ValidationError
 from starlette.routing import Route
 
-from mcp_client_server import __version__, limits
-from mcp_client_server.errors import AppError, NotFound, RateLimited, StoreUnavailable, ValidationFailed
+from mcp_client_server import __version__, activity, limits
+from mcp_client_server.errors import (
+    AppError,
+    ErrorCode,
+    NotFound,
+    RateLimited,
+    StoreUnavailable,
+    ValidationFailed,
+)
 from mcp_client_server.ids import QuestionId, TaskId
 from mcp_client_server.limits import Limits
 from mcp_client_server.mcp import views
@@ -58,7 +74,7 @@ from mcp_client_server.models import (
 )
 from mcp_client_server.services import Services
 from mcp_client_server.services.inbox import InboxService
-from mcp_client_server.services.keys import KeyService
+from mcp_client_server.services.keys import KeyService, client_info
 from mcp_client_server.services.questions import QuestionService
 from mcp_client_server.services.tasks import TaskService
 
@@ -66,6 +82,14 @@ logger = logging.getLogger(__name__)
 
 _LIST_TTL_MS = 5 * 60 * 1000
 _MINUTE = 60
+_CALL_TOOL = "tools/call"
+_UNKNOWN_METHOD = "unknown method"
+_NOT_VALID: tuple[ErrorCode, str] = ("bad_request", "The request is not valid.")
+_PROTOCOL_FAILURES: dict[int, tuple[ErrorCode, str]] = {
+    METHOD_NOT_FOUND: ("not_found", "Unknown method."),
+    INVALID_PARAMS: ("validation_failed", "The request parameters are not valid."),
+    INTERNAL_ERROR: ("internal", "Internal error."),
+}
 
 
 def instructions(app_name: str) -> str:
@@ -89,6 +113,10 @@ def _split(value: object) -> object:
 
 def _is_object(value: object) -> TypeIs[Mapping[str, object]]:
     return isinstance(value, Mapping)
+
+
+def _is_list(value: object) -> TypeIs[list[object]]:
+    return isinstance(value, list)
 
 
 TaskIdArg = Annotated[TaskId, Field(description="The `id` of a task, for example from create_task or list_tasks.")]
@@ -136,9 +164,12 @@ def corrective[**P](
         try:
             return await tool(*args, **kwargs)
         except AppError as exc:
+            activity.failed(exc.code, exc.message, exc.fields if isinstance(exc, ValidationFailed) else None)
             return _error(_explain(exc))
         except ValidationError as exc:
-            problems = (f"{'.'.join(str(part) for part in e['loc'])}: {e['msg']}" for e in exc.errors())
+            names = [".".join(str(part) for part in e["loc"]) for e in exc.errors()]
+            activity.failed("validation_failed", None, names)
+            problems = (f"{name}: {e['msg']}" for name, e in zip(names, exc.errors(), strict=True))
             return _error("Invalid arguments. " + " ".join(problems))
 
     return wrapper
@@ -179,7 +210,7 @@ class Tools:
         ] = True,
     ) -> Annotated[CallToolResult, TaskOut]:
         data = TaskCreate(title=title, description=description, priority=priority, status=status, notify=notify)
-        task = await self._tasks.create(current_principal(), data)
+        task = await self._tasks.create(current_principal(), data, host=activity.host())
         return _result(f"Created task {views.line(task)}", TaskOut.of(task))
 
     @corrective
@@ -246,6 +277,7 @@ class Tools:
             if name in sent and sent[name] is None:
                 fields[name] = None
         if not fields:
+            activity.failed("validation_failed", "No field to change.")
             return _error("No field to change. Send one or more of: " + ", ".join(given) + ".")
         principal = current_principal()
         updated = await self._tasks.update(principal, task_id, TaskPatch.model_validate(fields))
@@ -315,6 +347,8 @@ class Tools:
         wait_seconds: WaitArg = limits.MCP_WAIT_DEFAULT_SECONDS,
     ) -> Annotated[CallToolResult, Question]:
         question = await self._questions.get(current_principal(), question_id, wait=wait_seconds)
+        if wait_seconds > 0 and question.status == "pending":
+            activity.waited_for_nothing()
         return _result(views.question_summary(question), question)
 
     @corrective
@@ -332,6 +366,8 @@ class Tools:
         ] = True,
     ) -> Annotated[CallToolResult, InboxList]:
         page = await self._inbox.take(current_principal(), wait=wait_seconds, limit=limit, mark_read=mark_read)
+        if wait_seconds > 0 and not page.items:
+            activity.waited_for_nothing()
         set_inbox_unread(page.unread)
         return _result(views.inbox_listing(page.items), InboxList(items=page.items, unread=page.unread))
 
@@ -401,11 +437,12 @@ class Prompts:
         )
 
 
-class ClientRecorder:
-    """SDK middleware that keeps `last_client` of the key from the client info of each request."""
+class RequestObserver:
+    """SDK middleware. It keeps `last_client` of the key, and it tells the activity log what each request did."""
 
-    def __init__(self, keys: KeyService) -> None:
+    def __init__(self, keys: KeyService, tools: frozenset[str]) -> None:
         self._keys = keys
+        self._tools = tools
 
     async def __call__(
         self, ctx: ServerRequestContext[dict[str, object], object], call_next: CallNext
@@ -418,7 +455,64 @@ class ClientRecorder:
             except Exception:
                 # The client name is not worth a failed request.
                 logger.warning("could not record the MCP client", exc_info=True)
-        return await call_next(ctx)
+        trace = activity.current()
+        # A notification has no result, so it has no entry.
+        if trace is None or ctx.request_id is None:
+            return await call_next(ctx)
+        trace.client = client_info(*client) if client else None
+        tool = self._tool(ctx)
+        # The name of a tool that the server does not have is text from the client. It does not go in the log.
+        trace.action = tool if tool in self._tools else ctx.method
+        try:
+            result = await call_next(ctx)
+        except AppError as exc:
+            trace.fail(exc.code, exc.message)
+            raise
+        except ValidationError as exc:
+            trace.fail("validation_failed", None, (".".join(str(part) for part in e["loc"]) for e in exc.errors()))
+            raise
+        except MCPError as exc:
+            if exc.code == METHOD_NOT_FOUND:
+                trace.action = _UNKNOWN_METHOD
+            trace.fail(*_PROTOCOL_FAILURES.get(exc.code, _NOT_VALID))
+            raise
+        except Exception:
+            trace.fail("internal", "Internal error.")
+            raise
+        if trace.code is None and (text := _tool_error_text(result)) is not None:
+            _note_sdk_tool_error(trace, tool, text, known=tool in self._tools)
+        return result
+
+    @staticmethod
+    def _tool(ctx: ServerRequestContext[dict[str, object], object]) -> str | None:
+        if ctx.method != _CALL_TOOL:
+            return None
+        name: object = (ctx.params or {}).get("name")
+        return name if isinstance(name, str) else None
+
+
+def _tool_error_text(result: HandlerResult) -> str | None:
+    """The text of a tool result that is an error, else None. A tool gives its error as a result."""
+    if isinstance(result, CallToolResult):
+        result = result.model_dump(mode="json", by_alias=True)
+    if not _is_object(result) or result.get("isError") is not True:
+        return None
+    content: object = result.get("content")
+    first = content[0] if _is_list(content) and content else None
+    text: object = first.get("text") if _is_object(first) else None
+    return text if isinstance(text, str) else ""
+
+
+def _note_sdk_tool_error(trace: activity.Trace, tool: str | None, text: str, *, known: bool) -> None:
+    """Note a tool error that the SDK made before the tool ran. Its text has values from the client: do not copy it."""
+    if not known:
+        trace.fail("not_found", "Unknown tool.")
+    elif text == f"Error executing tool {tool}":
+        trace.fail("internal", "Internal error.")
+    else:
+        # The SDK lists each field that is not valid on a line of its own, and each problem on an indented line.
+        names = (line for line in text.splitlines()[1:] if line and not line[0].isspace())
+        trace.fail("validation_failed", None, names)
 
 
 def _client_info(ctx: ServerRequestContext[dict[str, object], object]) -> tuple[str, str] | None:
@@ -463,7 +557,7 @@ def build_mcp_server(services: Services) -> MCPServer:
         },
         # The server never changes its lists, and a listen stream would hold a connection for each client.
         subscriptions=False,
-        middleware=[ClientRecorder(services.keys)],
+        middleware=[RequestObserver(services.keys, frozenset(_descriptions(0)))],
     )
     tools = Tools(services.tasks, services.questions, services.inbox, services.keys)
     _add_tools(server, tools, services.limits)

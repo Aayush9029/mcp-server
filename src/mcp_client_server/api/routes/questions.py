@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response
 
-from mcp_client_server import limits
+from mcp_client_server import activity, limits
 from mcp_client_server.api.deps import AccountAuth, AgentAuth, AnyAuth, ServicesDep
 from mcp_client_server.api.query import choices
 from mcp_client_server.ids import QuestionId
@@ -29,7 +29,10 @@ async def get_question(
     services: ServicesDep,
     wait: Annotated[int, Query(ge=0, le=limits.WAIT_MAX_SECONDS)] = 0,
 ) -> Question:
-    return await services.questions.get(principal, question_id, wait=wait)
+    question = await services.questions.get(principal, question_id, wait=wait)
+    if wait > 0 and question.status == "pending":
+        activity.waited_for_nothing()
+    return question
 
 
 @router.post("/{question_id}/answer")

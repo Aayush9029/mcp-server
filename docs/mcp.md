@@ -4,6 +4,8 @@
 
 The server is stateless. It has no sessions, and each request carries its own API key. The server keeps the `clientInfo` of the most recent request as `last_client` of the key.
 
+A client can also send the header `X-Relaydeck-Host` with the short host name of its machine. See [Host name](overview.md#host-name). Each request has one entry in the [activity log](rest-api.md#activity-log) of its key.
+
 ## Connect
 
 See [Quickstart](quickstart.md) for the configuration of each agent.

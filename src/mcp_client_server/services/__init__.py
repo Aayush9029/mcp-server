@@ -10,6 +10,7 @@ from mcp_client_server.ids import IdSource
 from mcp_client_server.limits import Limits
 from mcp_client_server.push import PushDispatcher
 from mcp_client_server.services.accounts import AccountService, DeviceService
+from mcp_client_server.services.activity import ActivityLog
 from mcp_client_server.services.auth import AuthService
 from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.integrity import IntegrityService
@@ -41,6 +42,7 @@ class Services:
     tasks: TaskService
     questions: QuestionService
     inbox: InboxService
+    activity: ActivityLog
     maintenance: Maintenance
 
 
@@ -72,6 +74,7 @@ def build_services(
         keys=KeyService(store, push, purger, clock, ids, limits),
         tasks=TaskService(store, push, questions, inbox, seen, clock, ids, limits),
         inbox=inbox,
+        activity=ActivityLog(store, clock, ids),
         questions=questions,
         maintenance=Maintenance(store, questions, purger, clock, limits),
     )

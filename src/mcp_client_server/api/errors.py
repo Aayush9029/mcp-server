@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, TypeAdapter
 from starlette.exceptions import HTTPException
 
+from mcp_client_server import activity
 from mcp_client_server.errors import AppError, ErrorCode, RateLimited, StoreUnavailable, Unauthorized, ValidationFailed
 from mcp_client_server.models import ErrorBody, ErrorResponse
 
@@ -28,6 +29,10 @@ _HTTP_MESSAGES = {404: "Not found.", 405: "Method not allowed."}
 _REQUEST_PARTS = {"body", "query", "path", "header", "cookie"}
 
 
+def code_of(status: int) -> ErrorCode:
+    return _HTTP_CODES.get(status, "bad_request" if status < _SERVER_ERROR else "internal")
+
+
 def error_response(
     status: int,
     code: ErrorCode,
@@ -36,6 +41,8 @@ def error_response(
     fields: dict[str, str] | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
+    """The error body of the contract. The activity log of the request gets the same code."""
+    activity.failed(code, message, fields)
     body = ErrorResponse(error=ErrorBody(code=code, message=message, fields=fields))
     return JSONResponse(body.model_dump(exclude_none=True), status_code=status, headers=headers)
 
@@ -83,7 +90,7 @@ async def _request_validation(_: Request, exc: Exception) -> JSONResponse:
 async def _http_error(_: Request, exc: Exception) -> JSONResponse:
     if not isinstance(exc, HTTPException):
         raise exc
-    code = _HTTP_CODES.get(exc.status_code, "bad_request" if exc.status_code < _SERVER_ERROR else "internal")
+    code = code_of(exc.status_code)
     message = _HTTP_MESSAGES.get(exc.status_code, str(exc.detail))
     return error_response(exc.status_code, code, message, headers=exc.headers)
 

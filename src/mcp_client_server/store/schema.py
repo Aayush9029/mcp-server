@@ -8,7 +8,7 @@
 {p}:acc:{account}:tasks      zset    task id by updated_at
 {p}:acc:{account}:tasks:{s}  zset    the same, one for each status
 {p}:key:{key}                hash    account_id, label, prefix, last4, created_at, cred,
-                                     last_used_at, client_name, client_version, n:{status};
+                                     last_used_at, client_name, client_version, host, n:{status};
                                      a deleted key has gc_account in place of account_id and cred
 {p}:gc:keys                  zset    deleted key id by the time of the deletion, until its data is gone
 {p}:key:{key}:tasks          zset    task id by updated_at
@@ -26,6 +26,7 @@
 {p}:key:{key}:inbox          zset    inbox item id by created_at
 {p}:key:{key}:inbox:unread   zset    unread item id by created_at
 {p}:key:{key}:inbox:read     zset    read item id by the time it was read
+{p}:key:{key}:log            zset    activity entry JSON by the time of the request
 {p}:wdg:{account}:{device}   string  WidgetKit push throttle
 {p}:wdgd:{account}:{device}  string  a change came while the throttle was on
 {p}:lat:{task}               string  Live Activity update throttle
@@ -68,6 +69,9 @@ class KeySpace:
 
     def key_tasks(self, key_id: KeyId) -> str:
         return f"{self.prefix}:key:{key_id}:tasks"
+
+    def activity_log(self, key_id: KeyId) -> str:
+        return f"{self.prefix}:key:{key_id}:log"
 
     def task(self, task_id: TaskId) -> str:
         return f"{self.prefix}:tsk:{task_id}"

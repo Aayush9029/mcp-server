@@ -18,6 +18,7 @@ from mcp_client_server.models import (
     STATUSES,
     Account,
     AccountSettings,
+    ActivityEntry,
     ClientInfo,
     Device,
     InboxItem,
@@ -52,6 +53,8 @@ class AuthResult:
     limited: bool = False
     # Unread inbox items of the key. The MCP surface shows this number with each tool result.
     inbox_unread: int = 0
+    # The request gave the key a host name that it did not have before.
+    host_changed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +184,7 @@ class Store:
         self._inbox_add = reg(scripts.INBOX_ADD)
         self._inbox_take = reg(scripts.INBOX_TAKE)
         self._inbox_view = reg(scripts.INBOX_VIEW)
+        self._log_add = reg(scripts.LOG_ADD)
 
     async def ping(self) -> None:
         await self._kv.call("PING")
@@ -191,8 +195,16 @@ class Store:
     # Credentials and rate limits
 
     async def authenticate(
-        self, cred_hash: CredentialHash, *, now: float, rate_limit: int, rate_bucket: str, rate_ttl: int
+        self,
+        cred_hash: CredentialHash,
+        *,
+        now: float,
+        rate_limit: int,
+        rate_bucket: str,
+        rate_ttl: int,
+        host: str | None = None,
     ) -> AuthResult:
+        """Resolve a credential in one call. With `host`, an API key also gets that host name as its last one."""
         reply = items(
             await self._auth(
                 args=[
@@ -204,6 +216,7 @@ class Store:
                     rate_ttl,
                     LAST_USED_WRITE_INTERVAL_SECONDS,
                     _score(now - self._limits.unread_inbox_ttl_seconds),
+                    host or "",
                 ]
             )
         )
@@ -219,7 +232,7 @@ class Store:
             principal = AgentPrincipal(AccountId(account_id), KeyId(key_id))
         if code != 1:
             return AuthResult(principal, limited=True)
-        return AuthResult(principal, inbox_unread=integer(reply[2]))
+        return AuthResult(principal, inbox_unread=integer(reply[2]), host_changed=integer(reply[3]) == 1)
 
     async def hit(self, bucket: str, ttl: int) -> int:
         return integer(await self._rate_hit(keys=[self.keys.rate(bucket)], args=[ttl]))
@@ -692,6 +705,27 @@ class Store:
         rows = [(doc, float(read_at) if read_at else None) for doc, read_at in zip(flat[::2], flat[1::2], strict=True)]
         return rows, integer(reply[0])
 
+    # Activity log
+
+    async def add_activity(self, entries: Sequence[tuple[AccountId, KeyId, ActivityEntry]]) -> None:
+        """Write a batch of entries, each to the log of its key, in one call. A key that is gone gets no entry."""
+        lifetime = self._limits.activity_log_ttl_seconds
+        args: list[Arg] = [self._p, self._limits.activity_log_entries, lifetime]
+        for account_id, key_id, entry in entries:
+            args += [account_id, key_id, _score(entry.at), _score(entry.at - lifetime), entry.model_dump_json()]
+        await self._log_add(args=args)
+
+    async def activity_log(self, account_id: AccountId, key_id: KeyId, now: float) -> list[str] | None:
+        """The JSON of each entry of a key that is in its lifetime, newest first. None: the account has no such key."""
+        cutoff = _score(now - self._limits.activity_log_ttl_seconds)
+        owner, entries = await self._kv.batch(
+            [
+                ("HGET", self.keys.key(key_id), "account_id"),
+                ("ZREVRANGEBYSCORE", self.keys.activity_log(key_id), "+inf", cutoff),
+            ]
+        )
+        return texts(items(entries)) if owner == account_id else None
+
     def _question_index(self, scope: TaskScope) -> str:
         match scope:
             case KeyTasks(key_id):
@@ -753,6 +787,7 @@ def _key(key_id: KeyId, fields: dict[str, str]) -> Key:
         created_at=float(fields["created_at"]),
         last_used_at=float(last_used) if last_used else None,
         last_client=client,
+        last_host=fields.get("host") or None,
         counts=KeyCounts(
             todo=_count(fields, "todo"),
             in_progress=_count(fields, "in_progress"),

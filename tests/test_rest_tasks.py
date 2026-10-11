@@ -29,6 +29,7 @@ async def test_agent_creates_a_task_with_defaults(client: httpx2.AsyncClient, ap
         "updated_at": task["created_at"],
         "completed_at": None,
         "seen_at": task["created_at"],
+        "host": None,
     }
     assert task["id"].startswith("tsk_")
     assert (await client.get(f"/v1/tasks/{task['id']}", headers=key)).json() == task

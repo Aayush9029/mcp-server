@@ -19,7 +19,7 @@ from pydantic import (
 from mcp_client_server import limits
 from mcp_client_server.credentials import Secret
 from mcp_client_server.errors import ErrorCode
-from mcp_client_server.ids import AccountId, DeviceId, InboxItemId, KeyId, QuestionId, TaskId
+from mcp_client_server.ids import AccountId, ActivityId, DeviceId, InboxItemId, KeyId, QuestionId, TaskId
 
 Status = Literal["todo", "in_progress", "done", "cancelled"]
 Priority = Literal["low", "medium", "high", "urgent"]
@@ -30,6 +30,8 @@ PatchField = Literal["title", "description", "status", "priority", "notify", "pr
 QuestionKind = Literal["confirm", "choice", "text"]
 QuestionStatus = Literal["pending", "answered", "expired", "cancelled"]
 InboxKind = Literal["task_assigned", "task_changed", "task_deleted", "answer", "message"]
+Surface = Literal["mcp", "rest"]
+ActivityStatus = Literal["ok", "error"]
 
 STATUSES: tuple[Status, ...] = get_args(Status)
 PRIORITIES: tuple[Priority, ...] = get_args(Priority)
@@ -110,6 +112,8 @@ class Task(_Object):
     completed_at: float | None
     # When the agent of the key first got the task. A task from before this field has no value.
     seen_at: float | None = None
+    # The host name that the agent sent with the request that made the task.
+    host: str | None = None
 
     @property
     def is_open(self) -> bool:
@@ -136,6 +140,7 @@ class Key(_Object):
     created_at: float
     last_used_at: float | None = None
     last_client: ClientInfo | None = None
+    last_host: str | None = None
     counts: KeyCounts = Field(default_factory=KeyCounts)
 
 
@@ -208,6 +213,22 @@ class Agent(_Object):
     is_self: bool
     last_client: ClientInfo | None
     last_used_at: float | None
+    host: str | None
+
+
+class ActivityEntry(_Object):
+    """One request of an API key. It has no text of a task, a question, or a message, and no credential."""
+
+    id: ActivityId
+    at: float
+    surface: Surface
+    action: str
+    status: ActivityStatus
+    code: ErrorCode | None
+    message: str | None
+    duration_ms: int
+    client: ClientInfo | None
+    host: str | None
 
 
 class _Request(BaseModel):
@@ -357,6 +378,11 @@ class InboxList(_Object):
 
 class AgentList(_Object):
     agents: list[Agent]
+
+
+class ActivityList(_Object):
+    items: list[ActivityEntry]
+    next_cursor: str | None
 
 
 class TaskList(_Object):

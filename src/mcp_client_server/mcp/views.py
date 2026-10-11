@@ -36,6 +36,7 @@ class TaskOut(Task):
             updated_at=task.updated_at,
             completed_at=task.completed_at,
             seen_at=task.seen_at,
+            host=task.host,
             created_at_iso=iso(task.created_at),
             updated_at_iso=iso(task.updated_at),
             completed_at_iso=None if task.completed_at is None else iso(task.completed_at),
@@ -92,7 +93,10 @@ def inbox_listing(items: list[InboxItem]) -> str:
 
 
 def agent_listing(agents: list[Agent]) -> str:
-    lines = [f"{agent.key_id} {agent.label}{' (you)' if agent.is_self else ''}" for agent in agents]
+    lines = [
+        f"{agent.key_id} {agent.label}{' (you)' if agent.is_self else ''}{f' on {agent.host}' if agent.host else ''}"
+        for agent in agents
+    ]
     return "\n".join(["The keys of this account. Use a key ID or a label as `to` of send_message.", *lines])
 
 

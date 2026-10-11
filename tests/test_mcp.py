@@ -178,6 +178,7 @@ async def test_tools_list_has_the_order_schemas_and_annotations_of_the_contract(
         "updated_at",
         "completed_at",
         "seen_at",
+        "host",
         "created_at_iso",
         "updated_at_iso",
         "completed_at_iso",

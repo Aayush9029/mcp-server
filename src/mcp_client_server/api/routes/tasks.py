@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response
 
-from mcp_client_server import limits
+from mcp_client_server import activity, limits
 from mcp_client_server.api.deps import AccountAuth, AnyAuth, ServicesDep
 from mcp_client_server.api.query import choices
 from mcp_client_server.ids import KeyId, TaskId
@@ -42,7 +42,7 @@ async def list_tasks(
 
 @router.post("", status_code=201)
 async def create_task(data: TaskCreate, principal: AnyAuth, services: ServicesDep) -> Task:
-    return await services.tasks.create(principal, data)
+    return await services.tasks.create(principal, data, host=activity.host())
 
 
 @router.get("/{task_id}")

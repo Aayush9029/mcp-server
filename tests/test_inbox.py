@@ -268,6 +268,7 @@ async def test_a_credential_reaches_only_its_own_inbox(api: Api) -> None:
             "is_self": True,
             "last_client": None,
             "last_used_at": agents[0]["last_used_at"],
+            "host": None,
         },
         {
             "key_id": info_a["id"],
@@ -275,6 +276,7 @@ async def test_a_credential_reaches_only_its_own_inbox(api: Api) -> None:
             "is_self": False,
             "last_client": None,
             "last_used_at": agents[1]["last_used_at"],
+            "host": None,
         },
     ]
 

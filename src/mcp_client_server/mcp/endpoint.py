@@ -4,6 +4,7 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from mcp_client_server import activity
 from mcp_client_server.credentials import AgentPrincipal, presented_secret
 from mcp_client_server.errors import Forbidden
 from mcp_client_server.services.auth import AuthService
@@ -52,7 +53,8 @@ class McpEndpoint:
         origin = request.headers.get("origin")
         if origin and origin.rstrip("/") not in self._allowed_origins:
             raise Forbidden("This origin cannot use the MCP endpoint.")
-        identity = await self._auth.identify(presented_secret(request.headers, request.query_params))
+        secret = presented_secret(request.headers, request.query_params)
+        identity = await self._auth.identify(secret, activity.current())
         principal = identity.principal
         if not isinstance(principal, AgentPrincipal):
             raise Forbidden("The MCP endpoint needs an API key (mck_). The account token cannot use it.")

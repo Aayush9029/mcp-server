@@ -15,7 +15,7 @@ Each event has a name and one line of JSON data.
 
 ```http
 event: task.updated
-data: {"task":{"id":"tsk_01jb2m9x4e7q","key_id":"key_01jb2k3v9d","title":"Add dark mode support","description":"","status":"in_progress","priority":"high","notify":true,"progress":40,"status_note":"Updating the color tokens","source":"agent","created_at":1760112000.412,"updated_at":1760112300.9,"completed_at":null,"seen_at":1760112010.2}}
+data: {"task":{"id":"tsk_01jb2m9x4e7q","key_id":"key_01jb2k3v9d","title":"Add dark mode support","description":"","status":"in_progress","priority":"high","notify":true,"progress":40,"status_note":"Updating the color tokens","source":"agent","created_at":1760112000.412,"updated_at":1760112300.9,"completed_at":null,"seen_at":1760112010.2,"host":"studio-mac"}}
 ```
 
 The server sends a comment line (`: ping`) after 20 seconds with no event, so that a proxy does not close the connection.
@@ -29,7 +29,7 @@ The server sends a comment line (`: ping`) after 20 seconds with no event, so th
 | `task.updated` | `{"task": Task}` | A field of a task changes, also `seen_at` |
 | `task.deleted` | `{"task_id": "tsk_...", "key_id": "key_..."}` | A task is deleted, or it expires |
 | `key.created` | `{"key": Key}` | A key is made |
-| `key.updated` | `{"key": Key}` | The label changes, or `last_client` changes |
+| `key.updated` | `{"key": Key}` | The label changes, `last_client` changes, or `last_host` changes |
 | `key.deleted` | `{"key_id": "key_..."}` | A key is deleted. No event comes for its tasks and its questions. |
 | `question.created` | `{"question": Question}` | An agent asks a question |
 | `question.updated` | `{"question": Question}` | The status of a question changes |

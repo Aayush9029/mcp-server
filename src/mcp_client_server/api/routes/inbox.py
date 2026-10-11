@@ -2,10 +2,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from mcp_client_server import limits
+from mcp_client_server import activity, limits
 from mcp_client_server.api.deps import AccountAuth, AgentAuth, AnyAuth, ServicesDep
 from mcp_client_server.ids import KeyId
-from mcp_client_server.models import AgentList, InboxItem, InboxList, MessageCreate
+from mcp_client_server.models import ActivityList, AgentList, InboxItem, InboxList, MessageCreate
 
 router = APIRouter(prefix="/v1")
 
@@ -19,6 +19,8 @@ async def take_inbox(
     mark_read: Annotated[bool, Query()] = True,  # noqa: FBT002  a query parameter comes by name
 ) -> InboxList:
     page = await services.inbox.take(principal, wait=wait, limit=limit, mark_read=mark_read)
+    if wait > 0 and not page.items:
+        activity.waited_for_nothing()
     return InboxList(items=page.items, unread=page.unread)
 
 
@@ -31,6 +33,18 @@ async def send_message(data: MessageCreate, principal: AnyAuth, services: Servic
 async def view_inbox(key_id: KeyId, principal: AccountAuth, services: ServicesDep) -> InboxList:
     page = await services.inbox.view(principal, key_id)
     return InboxList(items=page.items, unread=page.unread)
+
+
+@router.get("/keys/{key_id}/activity")
+async def view_activity(
+    key_id: KeyId,
+    principal: AccountAuth,
+    services: ServicesDep,
+    limit: Annotated[int, Query(ge=1, le=limits.ACTIVITY_LIMIT_MAX)] = limits.ACTIVITY_LIMIT_DEFAULT,
+    cursor: str | None = None,
+) -> ActivityList:
+    page = await services.activity.page(principal, key_id, limit=limit, cursor=cursor)
+    return ActivityList(items=page.items, next_cursor=page.next_cursor)
 
 
 @router.get("/agents")

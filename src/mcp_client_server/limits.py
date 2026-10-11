@@ -29,6 +29,11 @@ INBOX_LIMIT_MAX = 50
 INBOX_LIMIT_DEFAULT = 20
 INBOX_VIEW_COUNT = 50
 
+HOST_MAX = 64
+CLIENT_FIELD_MAX = 100
+ACTIVITY_LIMIT_MAX = 100
+ACTIVITY_LIMIT_DEFAULT = 50
+
 LIST_LIMIT_MAX = 500
 LIST_LIMIT_DEFAULT = 100
 MCP_LIST_LIMIT_DEFAULT = 50
@@ -58,6 +63,9 @@ class Limits:
     unread_inbox_ttl_seconds: int = 7 * 24 * 3600
     read_inbox_ttl_seconds: int = 24 * 3600
     messages_per_hour: int = 60
+    # The activity log of a key keeps this many requests, and none that is older than the lifetime.
+    activity_log_entries: int = 200
+    activity_log_ttl_seconds: int = 7 * 24 * 3600
     closed_question_ttl_seconds: int = 90 * 24 * 3600
     # A filter on priority reads tasks that it does not return. One request reads this many at most.
     filter_scan_budget: int = 2000

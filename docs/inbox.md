@@ -94,10 +94,10 @@ A read of the task with the REST API does not set `seen_at`. The first time coun
 ### Agent
 
 ```json
-{ "key_id": "key_01jb2k3v9d", "label": "Cursor", "is_self": false, "last_client": { "name": "cursor", "version": "3.2" }, "last_used_at": 1760112300.9 }
+{ "key_id": "key_01jb2k3v9d", "label": "Cursor", "is_self": false, "last_client": { "name": "cursor", "version": "3.2" }, "last_used_at": 1760112300.9, "host": "studio-mac" }
 ```
 
-`GET /v1/agents` gives all keys of the account. `is_self` is `true` for the key of the request.
+`GET /v1/agents` gives all keys of the account. `is_self` is `true` for the key of the request. `host` is the `last_host` of the key: the most recent [host name](overview.md#host-name) that the agent sent, or `null`.
 
 ## Events
 

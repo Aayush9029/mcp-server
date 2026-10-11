@@ -2,6 +2,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
+from mcp_client_server import activity
 from mcp_client_server.credentials import (
     ACCOUNT_TOKEN_PREFIX,
     AccountPrincipal,
@@ -33,7 +34,7 @@ async def any_principal(request: Request, services: ServicesDep) -> Principal:
     # Only the app has an account token, so only such a request needs the app code. An API key does not.
     if secret is not None and secret.startswith(ACCOUNT_TOKEN_PREFIX):
         services.integrity.check_app_code(request.headers.get("x-app-code"))
-    return await services.auth.authenticate(secret)
+    return await services.auth.authenticate(secret, activity.current())
 
 
 async def account_principal(principal: Annotated[Principal, Depends(any_principal)]) -> AccountPrincipal:

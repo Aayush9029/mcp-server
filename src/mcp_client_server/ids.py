@@ -8,6 +8,7 @@ TaskId = NewType("TaskId", str)
 DeviceId = NewType("DeviceId", str)
 QuestionId = NewType("QuestionId", str)
 InboxItemId = NewType("InboxItemId", str)
+ActivityId = NewType("ActivityId", str)
 
 _CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz"
 
@@ -22,6 +23,8 @@ class IdSource(Protocol):
     def question_id(self) -> QuestionId: ...
 
     def inbox_id(self) -> InboxItemId: ...
+
+    def activity_id(self) -> ActivityId: ...
 
 
 def ulid() -> str:
@@ -45,3 +48,6 @@ class UlidSource:
 
     def inbox_id(self) -> InboxItemId:
         return InboxItemId(f"inb_{ulid()}")
+
+    def activity_id(self) -> ActivityId:
+        return ActivityId(f"act_{ulid()}")

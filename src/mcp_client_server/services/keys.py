@@ -5,14 +5,18 @@ from mcp_client_server.credentials import API_KEY_PREFIX, AccountPrincipal, Agen
 from mcp_client_server.errors import LimitReached, NotFound
 from mcp_client_server.events import frames
 from mcp_client_server.ids import IdSource, KeyId
-from mcp_client_server.limits import LAST_USED_WRITE_INTERVAL_SECONDS, Limits
+from mcp_client_server.limits import CLIENT_FIELD_MAX, LAST_USED_WRITE_INTERVAL_SECONDS, Limits
 from mcp_client_server.models import Agent, ClientInfo, Key, KeyCreate, KeyCreated, KeyPatch
 from mcp_client_server.push import PushDispatcher
 from mcp_client_server.services.purge import KeyPurger
 from mcp_client_server.store import Store
 
 _CLIENT_CACHE_MAX = 10_000
-_CLIENT_FIELD_MAX = 100
+
+
+def client_info(name: str, version: str) -> ClientInfo:
+    """The client of an MCP request, with each field at the length that the server keeps."""
+    return ClientInfo(name=name[:CLIENT_FIELD_MAX], version=version[:CLIENT_FIELD_MAX])
 
 
 class KeyService:
@@ -40,6 +44,7 @@ class KeyService:
                 is_self=key.id == principal.key_id,
                 last_client=key.last_client,
                 last_used_at=key.last_used_at,
+                host=key.last_host,
             )
             for key in await self._store.list_keys(principal.account_id)
         ]
@@ -82,7 +87,7 @@ class KeyService:
         if not name:
             return
         key_id = principal.key_id
-        client = ClientInfo(name=name[:_CLIENT_FIELD_MAX], version=version[:_CLIENT_FIELD_MAX])
+        client = client_info(name, version)
         recent = self._recent_clients.get(key_id)
         at = self._clock.monotonic()
         if recent and recent[0] == client and at - recent[1] < LAST_USED_WRITE_INTERVAL_SECONDS:

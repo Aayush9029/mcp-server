@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 
+from mcp_client_server.activity import Trace
 from mcp_client_server.clock import Clock
-from mcp_client_server.credentials import Principal, Secret, hash_secret, looks_like_credential
+from mcp_client_server.credentials import AgentPrincipal, Principal, Secret, hash_secret, looks_like_credential
 from mcp_client_server.errors import RateLimited, Unauthorized
+from mcp_client_server.events import frames
 from mcp_client_server.store import Store
 
 _MINUTE = 60
@@ -23,11 +25,15 @@ class AuthService:
         self._per_minute = per_minute
         self._accounts_per_hour = accounts_per_hour
 
-    async def authenticate(self, secret: Secret | None) -> Principal:
-        return (await self.identify(secret)).principal
+    async def authenticate(self, secret: Secret | None, trace: Trace | None = None) -> Principal:
+        return (await self.identify(secret, trace)).principal
 
-    async def identify(self, secret: Secret | None) -> "Identity":
-        """Resolve a credential, count it against its rate limit, and note that the key was used."""
+    async def identify(self, secret: Secret | None, trace: Trace | None = None) -> "Identity":
+        """Resolve a credential, count it against its rate limit, and note that the key was used.
+
+        With `trace`, the host name of the request becomes `last_host` of the key, and the trace gets the key:
+        also for a request above the rate limit, so the activity log shows that request.
+        """
         if not secret or not looks_like_credential(secret):
             raise Unauthorized("Missing or invalid credential.")
         cred_hash = hash_secret(secret)
@@ -38,12 +44,20 @@ class AuthService:
             rate_limit=self._per_minute,
             rate_bucket=f"c:{cred_hash[:24]}:{int(at // _MINUTE)}",
             rate_ttl=2 * _MINUTE,
+            host=trace.host if trace else None,
         )
-        if result.principal is None:
+        principal = result.principal
+        if principal is None:
             raise Unauthorized("Missing or invalid credential.")
+        if trace is not None and isinstance(principal, AgentPrincipal):
+            trace.principal, trace.at = principal, at
         if result.limited:
             raise RateLimited("Too many requests. Slow down.", _MINUTE - int(at % _MINUTE))
-        return Identity(result.principal, result.inbox_unread)
+        if result.host_changed and isinstance(principal, AgentPrincipal):
+            key = await self._store.get_key(principal.account_id, principal.key_id)
+            if key is not None:
+                await self._store.publish(principal.account_id, frames.key_updated(key))
+        return Identity(principal, result.inbox_unread)
 
     async def limit_account_creation(self, client_ip: str) -> None:
         await self._limit_by_address("ip", client_ip, "Too many new accounts from this address.")

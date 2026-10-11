@@ -1,6 +1,4 @@
-import base64
 import json
-import math
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -27,6 +25,7 @@ from mcp_client_server.models import (
     TaskPatch,
 )
 from mcp_client_server.push import PushDispatcher, TaskChange
+from mcp_client_server.services import cursors
 from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.questions import QuestionService
 from mcp_client_server.services.scope import own_scope
@@ -55,23 +54,12 @@ class TaskPage:
 
 
 def encode_cursor(cursor: Cursor) -> str:
-    return base64.urlsafe_b64encode(f"{cursor.score!r}:{cursor.task_id}".encode()).decode().rstrip("=")
+    return cursors.encode(cursor.score, cursor.task_id)
 
 
 def decode_cursor(value: str | None) -> Cursor | None:
-    if not value:
-        return None
-    problem = ValidationFailed({"cursor": "Not a valid cursor. Use the next_cursor of the previous page."})
-    try:
-        text = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode()
-        score, _, task_id = text.partition(":")
-        cursor = Cursor(float(score), TaskId(task_id))
-    except ValueError as exc:
-        raise problem from exc
-    # The store cannot compare with a score that is not a finite number.
-    if not task_id or not math.isfinite(cursor.score):
-        raise problem
-    return cursor
+    position = cursors.decode(value)
+    return None if position is None else Cursor(position[0], TaskId(position[1]))
 
 
 def apply_patch(task: Task, patch: TaskPatch, at: float) -> tuple[Task, frozenset[PatchField]]:
@@ -118,6 +106,7 @@ def apply_patch(task: Task, patch: TaskPatch, at: float) -> tuple[Task, frozense
         updated_at=max(at, round(task.updated_at + 1e-6, 6)),
         completed_at=completed_at,
         seen_at=task.seen_at,
+        host=task.host,
     )
     return patched, changed
 
@@ -150,7 +139,8 @@ class TaskService:
             "Set finished tasks to done or cancelled, or delete tasks."
         )
 
-    async def create(self, principal: Principal, data: TaskCreate) -> Task:
+    async def create(self, principal: Principal, data: TaskCreate, *, host: str | None = None) -> Task:
+        """Make a task. `host` is the host name that came with the request of an agent."""
         key_id = _target_key(principal, data.key_id)
         at = self._clock.now()
         done = data.status == "done"
@@ -171,6 +161,7 @@ class TaskService:
             completed_at=at if done else None,
             # The agent that makes a task has it. A task from the app waits for the agent to get it.
             seen_at=at if by_agent else None,
+            host=host if by_agent else None,
         )
         status = await self._store.create_task(principal.account_id, task, frames.task_created(task))
         match status:

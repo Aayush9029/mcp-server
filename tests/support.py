@@ -15,7 +15,7 @@ from mcp_types import CallToolResult, Implementation, TextContent
 from redis.asyncio import Redis
 
 from mcp_client_server.errors import StoreUnavailable
-from mcp_client_server.ids import AccountId, DeviceId, InboxItemId, KeyId, QuestionId, TaskId
+from mcp_client_server.ids import AccountId, ActivityId, DeviceId, InboxItemId, KeyId, QuestionId, TaskId
 from mcp_client_server.models import Device, Task
 from mcp_client_server.push import PushRequest, PushResult
 from mcp_client_server.services import Services
@@ -133,6 +133,8 @@ async def _arrival(waiters: list[asyncio.Future[None]]) -> None:
 class SequentialIds:
     def __init__(self) -> None:
         self._count = 0
+        # The entries of the activity log have their own numbers, so they do not move the IDs of the other objects.
+        self._entries = 0
 
     def _next(self, prefix: str) -> str:
         self._count += 1
@@ -152,6 +154,10 @@ class SequentialIds:
 
     def inbox_id(self) -> InboxItemId:
         return InboxItemId(self._next("inb"))
+
+    def activity_id(self) -> ActivityId:
+        self._entries += 1
+        return ActivityId(f"act_{self._entries:06d}")
 
 
 class RecordingPushSender:
@@ -283,6 +289,9 @@ class RawStore:
 
     async def sorted_set(self, key: str) -> list[str]:
         return texts(items(await self._kv.call("ZRANGE", key, 0, -1)))
+
+    async def add_to_sorted_set(self, key: str, score: float, member: str) -> None:
+        await self._kv.call("ZADD", key, score, member)
 
     async def publish(self, channel: str, data: str) -> None:
         await self._kv.call("PUBLISH", channel, data)

@@ -197,6 +197,7 @@ async def test_keys_create_list_rename_delete(client: httpx2.AsyncClient, api: A
         "created_at": key["created_at"],
         "last_used_at": None,
         "last_client": None,
+        "last_host": None,
         "counts": {"todo": 0, "in_progress": 0, "done": 0, "cancelled": 0},
     }
     assert key["id"].startswith("key_")

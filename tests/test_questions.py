@@ -519,6 +519,8 @@ async def test_a_deleted_key_or_account_takes_its_questions_with_it(running: Run
     keeper = await api.account()
     keeper_key, _ = await api.key(keeper)
     kept = await api.ask(keeper_key)
+    # The request of the keeper has an entry in its activity log. The entry is written after the response.
+    await running.services.activity.drain()
     before = await raw.keys()
 
     account, key, key_info = await api.agent()

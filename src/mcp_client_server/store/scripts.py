@@ -13,8 +13,10 @@ local QUESTION_STATUSES = {'pending', 'answered', 'expired', 'cancelled'}
 """
 
 AUTH = """
--- ARGV: prefix, cred hash, now, rate limit, rate bucket, rate ttl, touch interval, inbox unread cutoff
--- Returns {0} for an unknown credential, {2, cred} above the rate limit, else {1, cred, unread inbox items}.
+-- ARGV: prefix, cred hash, now, rate limit, rate bucket, rate ttl, touch interval, inbox unread cutoff,
+--       host name of the agent ('' = none)
+-- Returns {0} for an unknown credential, {2, cred} above the rate limit,
+-- else {1, cred, unread inbox items, 1 if the key got a different host name else 0}.
 local p = ARGV[1]
 local cred = redis.call('GET', p .. ':cred:' .. ARGV[2])
 if not cred then return {0} end
@@ -29,11 +31,16 @@ local key_id = string.match(cred, '^k:[^:]+:(.+)$')
 if key_id and redis.call('SET', p .. ':touch:' .. key_id, '1', 'NX', 'EX', ARGV[7]) then
   redis.call('HSET', p .. ':key:' .. key_id, 'last_used_at', ARGV[3])
 end
-local unread = 0
+local unread, new_host = 0, 0
 if key_id then
-  unread = redis.call('ZCOUNT', p .. ':key:' .. key_id .. ':inbox:unread', '(' .. ARGV[8], '+inf')
+  local keyk = p .. ':key:' .. key_id
+  unread = redis.call('ZCOUNT', keyk .. ':inbox:unread', '(' .. ARGV[8], '+inf')
+  if ARGV[9] ~= '' and redis.call('HGET', keyk, 'host') ~= ARGV[9] then
+    redis.call('HSET', keyk, 'host', ARGV[9])
+    new_host = 1
+  end
 end
-return {1, cred, unread}
+return {1, cred, unread, new_host}
 """
 
 RATE_HIT = """
@@ -140,7 +147,8 @@ KEY_DETACH = (
 -- ARGV: prefix, account, key, now, event
 -- Returns 0 if the account has no such key, 2 if the key is detached already, else 1.
 -- After this call nobody can use the key: its credential is gone, the account does not list it, and the
--- account indexes have no task and no question of it. Its data stays for KEY_PURGE, which runs in steps.
+-- account indexes have no task and no question of it. Its activity log is gone. Its other data stays for
+-- KEY_PURGE, which runs in steps.
 local aid, kid = ARGV[2], ARGV[3]
 local keyk = p .. ':key:' .. kid
 local h = redis.call('HMGET', keyk, 'account_id', 'cred', 'gc_account')
@@ -152,7 +160,7 @@ if h[2] then redis.call('DEL', p .. ':cred:' .. h[2]) end
 redis.call('HDEL', keyk, 'account_id', 'cred')
 redis.call('HSET', keyk, 'gc_account', aid)
 redis.call('ZREM', p .. ':acc:' .. aid .. ':keys', kid)
-redis.call('DEL', p .. ':touch:' .. kid)
+redis.call('DEL', p .. ':touch:' .. kid, keyk .. ':log')
 -- Native set differences: no loop over the tasks here.
 local acc_tasks, key_tasks = p .. ':acc:' .. aid .. ':tasks', keyk .. ':tasks'
 redis.call('ZDIFFSTORE', acc_tasks, 2, acc_tasks, key_tasks)
@@ -222,7 +230,7 @@ if #iids > 0 then
   redis.call('ZREM', base .. ':read', unpack(iids))
   return out
 end
-redis.call('DEL', keyk, key_tasks, base, base .. ':unread', base .. ':read')
+redis.call('DEL', keyk, key_tasks, base, base .. ':unread', base .. ':read', keyk .. ':log')
 for _, s in ipairs(STATUSES) do redis.call('DEL', key_tasks .. ':' .. s) end
 for _, s in ipairs(QUESTION_STATUSES) do redis.call('DEL', keyk .. ':qst:' .. s) end
 redis.call('ZREM', p .. ':gc:keys', kid)
@@ -249,7 +257,7 @@ for _, kid in ipairs(kids) do
   if kc then redis.call('DEL', p .. ':cred:' .. kc) end
   redis.call('HDEL', keyk, 'account_id', 'cred')
   redis.call('HSET', keyk, 'gc_account', aid)
-  redis.call('DEL', p .. ':touch:' .. kid)
+  redis.call('DEL', p .. ':touch:' .. kid, keyk .. ':log')
   redis.call('ZADD', p .. ':gc:keys', ARGV[3], kid)
 end
 for _, did in ipairs(redis.call('SMEMBERS', acck .. ':devices')) do
@@ -669,3 +677,22 @@ end
 return out
 """
 )
+
+LOG_ADD = """
+-- ARGV: prefix, cap, lifetime in seconds, then for each entry: account, key, time, cutoff, json
+-- Adds each entry to the activity log of its key, if the account still has the key. The log keeps the newest
+-- `cap` entries and no entry from before the cutoff. A key that makes no more requests loses its log after
+-- the lifetime.
+local p, cap = ARGV[1], tonumber(ARGV[2])
+for i = 4, #ARGV, 5 do
+  local keyk = p .. ':key:' .. ARGV[i + 1]
+  if redis.call('HGET', keyk, 'account_id') == ARGV[i] then
+    local logk = keyk .. ':log'
+    redis.call('ZADD', logk, ARGV[i + 2], ARGV[i + 4])
+    redis.call('ZREMRANGEBYSCORE', logk, '-inf', '(' .. ARGV[i + 3])
+    redis.call('ZREMRANGEBYRANK', logk, 0, -cap - 1)
+    redis.call('EXPIRE', logk, ARGV[3])
+  end
+end
+return 1
+"""
