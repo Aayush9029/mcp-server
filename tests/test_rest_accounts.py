@@ -9,7 +9,7 @@ from mcp_client_server.credentials import Secret, hash_secret
 from mcp_client_server.limits import Limits
 from mcp_client_server.store import Store
 from tests.conftest import Launch
-from tests.support import DEVICE_A, DEVICE_B, Api, Headers, Json, RawStore, Running, error, secret_of
+from tests.support import DEVICE_A, DEVICE_B, Api, Json, RawStore, Running, error, secret_of
 
 ACCOUNT_ROUTES = [
     ("GET", "/v1/account"),
@@ -143,15 +143,21 @@ async def test_credential_rate_limit_gives_429_with_retry_after(launch: Launch) 
 
 
 def test_client_ip_trusts_proxy_headers_only_on_render() -> None:
-    def request(headers: Headers) -> Request:
-        raw = [(name.lower().encode(), value.encode()) for name, value in headers.items()]
+    def request(*headers: tuple[str, str]) -> Request:
+        raw = [(name.lower().encode(), value.encode()) for name, value in headers]
         return Request({"type": "http", "headers": raw, "client": ("10.0.0.7", 1234)})
 
-    spoof = {"X-Forwarded-For": "1.1.1.1, 198.51.100.4, 172.16.0.1", "CF-Connecting-IP": "198.51.100.4"}
-    assert client_ip(request(spoof), behind_render=False) == "10.0.0.7"
-    assert client_ip(request(spoof), behind_render=True) == "198.51.100.4"
-    assert client_ip(request({"X-Forwarded-For": "1.1.1.1, 198.51.100.4"}), behind_render=True) == "198.51.100.4"
-    assert client_ip(request({}), behind_render=True) == "10.0.0.7"
+    spoof = request(("X-Forwarded-For", "1.1.1.1, 198.51.100.4, 172.16.0.1"), ("CF-Connecting-IP", "198.51.100.4"))
+    assert client_ip(spoof, behind_render=False) == "10.0.0.7"
+    assert client_ip(spoof, behind_render=True) == "198.51.100.4"
+    assert client_ip(request(("X-Forwarded-For", "1.1.1.1, 198.51.100.4")), behind_render=True) == "198.51.100.4"
+    assert client_ip(request(), behind_render=True) == "10.0.0.7"
+    # The caller sent the header already. The address that the proxy adds is the last one, in the last header.
+    twice = request(("X-Forwarded-For", "1.1.1.1"), ("X-Forwarded-For", "2.2.2.2, 198.51.100.4"))
+    assert client_ip(twice, behind_render=True) == "198.51.100.4"
+    appended = request(("X-Forwarded-For", "1.1.1.1,"), ("X-Forwarded-For", "198.51.100.4"))
+    assert client_ip(appended, behind_render=True) == "198.51.100.4"
+    assert client_ip(request(("X-Forwarded-For", " , ")), behind_render=True) == "10.0.0.7"
 
 
 async def test_keys_create_list_rename_delete(client: httpx2.AsyncClient, api: Api) -> None:

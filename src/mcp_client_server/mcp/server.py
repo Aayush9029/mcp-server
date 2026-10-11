@@ -116,7 +116,9 @@ def _explain(exc: AppError) -> str:
     if isinstance(exc, NotFound):
         if exc.message.startswith("Question"):
             return f"{exc.message} This API key sees only its own questions. Use the `id` that ask_user returned."
-        return f"{exc.message} This API key sees only its own tasks. Call list_tasks to get the valid task IDs."
+        if exc.message.startswith("Task"):
+            return f"{exc.message} This API key sees only its own tasks. Call list_tasks to get the valid task IDs."
+        return exc.message
     if isinstance(exc, RateLimited):
         minutes = -(-exc.retry_after // 60)
         return f"{exc.message} Try again in {minutes} min. Do not call again before then."

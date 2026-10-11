@@ -15,7 +15,7 @@ Each event has a name and one line of JSON data.
 
 ```http
 event: task.updated
-data: {"task":{"id":"tsk_01jb2m9x4e7q","key_id":"key_01jb2k3v9d","title":"Add dark mode support","description":"","status":"in_progress","priority":"high","notify":true,"progress":40,"status_note":"Updating the color tokens","source":"agent","created_at":1760112000.412,"updated_at":1760112300.9,"completed_at":null}}
+data: {"task":{"id":"tsk_01jb2m9x4e7q","key_id":"key_01jb2k3v9d","title":"Add dark mode support","description":"","status":"in_progress","priority":"high","notify":true,"progress":40,"status_note":"Updating the color tokens","source":"agent","created_at":1760112000.412,"updated_at":1760112300.9,"completed_at":null,"seen_at":1760112010.2}}
 ```
 
 The server sends a comment line (`: ping`) after 20 seconds with no event, so that a proxy does not close the connection.

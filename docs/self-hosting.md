@@ -116,6 +116,16 @@ A push to the `main` branch deploys a new version.
 - The server deletes old data by itself. See [Overview](overview.md#retention).
 - If the server runs behind a proxy that is not Render, the limit for each IP address uses the address of the proxy. Put a rate limit in your proxy in that case.
 
+### Delete an account for a person
+
+A person who lost the device cannot delete the account in the app. Run this inside the service environment (on Render, as a one-off job of the web service), with the account ID or the ID of one of its keys from the support request:
+
+```bash
+uv run mcp-client-server admin delete-account --key-id key_01jb2k3v9d
+```
+
+It deletes the account with all its data, as `DELETE /v1/account` does, and prints only the account ID. The exit code is `1` if there is no such account, and `2` if the store does not answer.
+
 ## Develop
 
 ```bash

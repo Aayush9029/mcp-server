@@ -132,6 +132,18 @@ async def test_account_deleted_is_sent_and_then_the_stream_ends(hub: EventHub, b
     assert hub.stream_count == 0
 
 
+async def test_account_deleted_reaches_a_stream_whose_queue_it_fills(start_hub: StartHub, bus: FakeBus) -> None:
+    hub = start_hub(queue_size=2)
+    await hub.start()
+    subscription = await hub.open(MINE)
+    bus.publish(KEYS.channel(MINE), event(1))
+    bus.publish(KEYS.channel(MINE), frames.account_deleted())
+    await settle()
+
+    assert hub.stream_count == 0
+    assert (await rest(subscription))[-1] == frames.account_deleted()
+
+
 async def test_a_silent_stream_gets_a_ping_comment(start_hub: StartHub, bus: FakeBus) -> None:
     hub = start_hub(ping_seconds=0.01)
     await hub.start()

@@ -373,7 +373,7 @@ def secret_of(auth: Headers) -> str:
 
 
 def error(response: httpx2.Response, status: int, code: str) -> Json:
-    """Assert the error shape of docs/api.md and return the `error` object."""
+    """Assert the error shape of docs/overview.md and return the `error` object."""
     assert response.status_code == status, response.text
     body: Json = response.json()["error"]
     assert body["code"] == code

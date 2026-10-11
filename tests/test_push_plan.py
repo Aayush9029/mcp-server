@@ -1,4 +1,4 @@
-"""Which pushes a change gives, and the exact payloads of docs/api.md. No store and no network."""
+"""Which pushes a change gives, and the exact payloads of docs/push.md. No store and no network."""
 
 import json
 

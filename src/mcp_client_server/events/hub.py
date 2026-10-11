@@ -215,6 +215,7 @@ class EventHub:
                 queue.put_nowait(message.data)
             except asyncio.QueueFull:
                 # A client this far behind gets the full lists again after it connects again.
+                _clear(queue)
                 self._drop(message.channel, queue)
                 continue
             if final:
@@ -252,11 +253,16 @@ class EventHub:
             self._subscriber = self._connect()
 
 
+def _clear(queue: _Queue) -> None:
+    while not queue.empty():
+        queue.get_nowait()
+
+
 def _end(queue: _Queue) -> None:
     """Tell the reader of a queue that no more frames come."""
     if queue.full():
-        while not queue.empty():
-            queue.get_nowait()
+        # The oldest frame makes room. The newest frame can be `account.deleted`, and the client must see it.
+        queue.get_nowait()
     queue.put_nowait(None)
 
 

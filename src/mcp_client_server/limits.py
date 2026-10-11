@@ -1,6 +1,9 @@
-"""Limits from docs/api.md. Change both places together."""
+"""Limits from docs/overview.md. Change both places together."""
 
 from dataclasses import dataclass
+
+# The largest field is a description of 20,000 characters, and a character is 4 bytes at most.
+MAX_BODY_BYTES = 1024 * 1024
 
 TITLE_MAX = 200
 DESCRIPTION_MAX = 20_000

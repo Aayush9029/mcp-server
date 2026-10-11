@@ -9,6 +9,12 @@ from pathlib import Path
 from fastapi import Request, Response
 
 IMMUTABLE = "public, max-age=31536000, immutable"
+# On each response of the site. The site has no frame and no cross-site script, so a browser can be strict.
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+}
 _MEDIA_TYPES = {
     ".avif": "image/avif",
     ".css": "text/css; charset=utf-8",
@@ -38,7 +44,7 @@ class Cached:
     status: int = HTTPStatus.OK
 
     def response(self, request: Request) -> Response:
-        headers = {"Cache-Control": self.cache_control, "ETag": self.etag}
+        headers = {**SECURITY_HEADERS, "Cache-Control": self.cache_control, "ETag": self.etag}
         if self.compressed is not None:
             headers["Vary"] = "Accept-Encoding"
         if self.status == HTTPStatus.OK and self.etag in request.headers.get("if-none-match", ""):

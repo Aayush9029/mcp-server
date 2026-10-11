@@ -1,4 +1,4 @@
-"""Server-sent event frames from docs/api.md. A frame is the unit that goes through pub/sub."""
+"""Server-sent event frames from docs/events.md. A frame is the unit that goes through pub/sub."""
 
 from typing import Literal
 

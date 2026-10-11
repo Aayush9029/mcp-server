@@ -1,4 +1,4 @@
-"""The contract objects of docs/api.md. REST and MCP share these definitions."""
+"""The contract objects of docs/rest-api.md. REST and MCP share these definitions."""
 
 import base64
 import binascii

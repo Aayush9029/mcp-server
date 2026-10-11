@@ -76,6 +76,7 @@ Each error has this body and a matching HTTP status.
 | 404 | `not_found` | The resource does not exist, or it belongs to a different key or account. |
 | 405 | `method_not_allowed` | |
 | 409 | `conflict` | A count limit is full, or the state of the resource does not permit the change. |
+| 413 | `bad_request` | The body is larger than 1 MB. |
 | 422 | `validation_failed` | `error.fields` maps each field name to a message. |
 | 429 | `rate_limited` | Wait for the seconds in the `Retry-After` header. |
 | 500 | `internal` | A defect in the server. |

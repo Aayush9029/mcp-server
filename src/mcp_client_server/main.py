@@ -1,13 +1,15 @@
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from cryptography import x509
 from fastapi import FastAPI
 from redis.asyncio import Redis
 
 from mcp_client_server import __version__
+from mcp_client_server.api.bodylimit import BodyLimit
 from mcp_client_server.api.errors import install_error_handlers
 from mcp_client_server.api.routes import router as api_router
 from mcp_client_server.appattest import apple_roots
@@ -19,7 +21,7 @@ from mcp_client_server.limits import Limits
 from mcp_client_server.logsetup import configure_logging
 from mcp_client_server.mcp.server import mcp_route
 from mcp_client_server.push import ApnsClient, PushDispatcher, PushSender, Topics
-from mcp_client_server.services import build_services
+from mcp_client_server.services import Services, build_services
 from mcp_client_server.site import site_router
 from mcp_client_server.store import RedisSubscriber, Store, command_client, event_client
 
@@ -42,7 +44,20 @@ def _topics(settings: Settings) -> Topics | None:
     return Topics(app=settings.apns_bundle_id, watch=settings.apns_watch_bundle_id or settings.apns_bundle_id)
 
 
-def create_app(
+@dataclass(frozen=True, slots=True)
+class Runtime:
+    """The service layer with its connections. The web application and the operator commands both run on it."""
+
+    services: Services
+    # In the order of the dependencies: the work that makes pushes stops first, the connections close last.
+    closers: tuple[Callable[[], Awaitable[None]], ...]
+
+    async def aclose(self) -> None:
+        for close in self.closers:
+            await close()
+
+
+def build_runtime(
     settings: Settings | None = None,
     *,
     redis: Redis | None = None,
@@ -52,7 +67,7 @@ def create_app(
     ids: IdSource | None = None,
     limits: Limits | None = None,
     attest_roots: Sequence[x509.Certificate] | None = None,
-) -> FastAPI:
+) -> Runtime:
     settings = settings or get_settings()
     clock = clock or SystemClock()
     limits = limits or Limits()
@@ -65,12 +80,37 @@ def create_app(
     push = PushDispatcher(store, push_sender or _push_sender(settings, clock), _topics(settings), clock)
     roots = apple_roots() if attest_roots is None else attest_roots
     services = build_services(settings, store, events, push, clock, ids or UlidSource(), limits, roots)
+    return Runtime(services, (events.stop, push.aclose, subscriber.aclose, commands.aclose))
+
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    redis: Redis | None = None,
+    event_redis: Redis | None = None,
+    push_sender: PushSender | None = None,
+    clock: Clock | None = None,
+    ids: IdSource | None = None,
+    limits: Limits | None = None,
+    attest_roots: Sequence[x509.Certificate] | None = None,
+) -> FastAPI:
+    runtime = build_runtime(
+        settings,
+        redis=redis,
+        event_redis=event_redis,
+        push_sender=push_sender,
+        clock=clock,
+        ids=ids,
+        limits=limits,
+        attest_roots=attest_roots,
+    )
+    services = runtime.services
     route, mcp_sessions = mcp_route(services)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         # The store can be down at this point. Each part connects when it needs to, and connects again after a loss.
-        await events.start()
+        await services.events.start()
         loops = [
             asyncio.create_task(services.maintenance.run(), name="maintenance"),
             asyncio.create_task(services.maintenance.run_question_expiry(), name="question-expiry"),
@@ -79,17 +119,13 @@ def create_app(
             async with mcp_sessions.run():
                 yield
         finally:
-            # In the order of the dependencies: the work that makes pushes stops first, the connections close last.
             for loop in loops:
                 loop.cancel()
             await asyncio.gather(*loops, return_exceptions=True)
-            await events.stop()
-            await push.aclose()
-            await subscriber.aclose()
-            await commands.aclose()
+            await runtime.aclose()
 
     app = FastAPI(
-        title=settings.app_name,
+        title=services.settings.app_name,
         version=__version__,
         lifespan=lifespan,
         docs_url=None,
@@ -98,7 +134,8 @@ def create_app(
     )
     app.state.services = services
     install_error_handlers(app)
+    app.add_middleware(BodyLimit)
     app.include_router(api_router)
-    app.include_router(site_router(settings, limits))
+    app.include_router(site_router(services.settings, services.limits))
     app.router.routes.append(route)
     return app

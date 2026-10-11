@@ -4,7 +4,7 @@ from mcp_client_server.clock import Clock
 from mcp_client_server.credentials import ACCOUNT_TOKEN_PREFIX, AccountPrincipal, hash_secret, new_secret
 from mcp_client_server.errors import AttestationInvalid, LimitReached, NotFound
 from mcp_client_server.events import frames
-from mcp_client_server.ids import DeviceId, IdSource
+from mcp_client_server.ids import AccountId, DeviceId, IdSource, KeyId
 from mcp_client_server.limits import Limits
 from mcp_client_server.models import Account, AccountCreated, AccountPatch, Device, DeviceInput
 from mcp_client_server.store import AttestedKey, Store
@@ -35,8 +35,13 @@ class AccountService:
             raise NotFound("Account not found.")
         return account
 
-    async def delete(self, principal: AccountPrincipal) -> None:
-        await self._store.delete_account(principal.account_id, frames.account_deleted())
+    async def delete(self, principal: AccountPrincipal) -> bool:
+        """Delete the account with all its data. False if there is no such account."""
+        return await self._store.delete_account(principal.account_id, frames.account_deleted())
+
+    async def account_of_key(self, key_id: KeyId) -> AccountId | None:
+        """The account that owns a key, for an operator who has only the key ID from a support request."""
+        return await self._store.key_account(key_id)
 
 
 class DeviceService:

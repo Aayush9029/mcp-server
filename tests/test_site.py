@@ -201,6 +201,9 @@ async def test_each_route_has_its_content_type_and_cache_lifetime(
     assert response.status_code == 200
     assert response.headers["content-type"] == media_type
     assert response.headers["cache-control"] == cache
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert response.content
     head = await site.head(path)
     assert head.status_code == 200

@@ -559,6 +559,11 @@ async def test_inbox_tools_through_the_sdk_client(launch: Launch, mode: str) -> 
                 result = await client.call_tool("send_message", arguments)
                 assert result.is_error is True, arguments
                 assert word in tool_text(result), tool_text(result)
+            # A receiver that is not found is not a task problem, so the text does not send the model to list_tasks.
+            wrong_to = await client.call_tool("send_message", {"to": "Nobody", "text": "Hi"})
+            assert wrong_to.is_error is True
+            assert "list_agents" in tool_text(wrong_to)
+            assert "list_tasks" not in tool_text(wrong_to)
             wrong = await client.call_tool("check_inbox", {"limit": 51})
             assert wrong.is_error is True
 

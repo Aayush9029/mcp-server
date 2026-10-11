@@ -1,4 +1,4 @@
-"""APNs payloads from docs/api.md. All functions here are pure."""
+"""APNs payloads from docs/push.md. All functions here are pure."""
 
 import json
 from dataclasses import dataclass
