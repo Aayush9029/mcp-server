@@ -21,6 +21,7 @@ from mcp_client_server.models import (
 )
 from mcp_client_server.services.scope import own_scope
 from mcp_client_server.services.seen import SeenMarker
+from mcp_client_server.services.waits import WaitSlots
 from mcp_client_server.store import Store
 
 logger = logging.getLogger(__name__)
@@ -55,11 +56,19 @@ class InboxService:
     """What the person and other agents send to a key. A change that a key makes itself never comes here."""
 
     def __init__(
-        self, store: Store, events: EventHub, seen: SeenMarker, clock: Clock, ids: IdSource, limits: Limits
+        self,
+        store: Store,
+        events: EventHub,
+        seen: SeenMarker,
+        waits: WaitSlots,
+        clock: Clock,
+        ids: IdSource,
+        limits: Limits,
     ) -> None:
         self._store = store
         self._events = events
         self._seen = seen
+        self._waits = waits
         self._clock = clock
         self._ids = ids
         self._limits = limits
@@ -95,6 +104,8 @@ class InboxService:
                     raise ValidationFailed({"to": "Not permitted with an account credential. Use key_id."})
                 if data.key_id is None:
                     raise ValidationFailed({"key_id": "Required with an account credential."})
+                if await self._store.key_account(data.key_id) != principal.account_id:
+                    raise NotFound("Key not found.")
                 receiver, sender, sender_id = data.key_id, _PERSON, principal.account_id
             case AgentPrincipal():
                 if data.key_id is not None:
@@ -127,22 +138,23 @@ class InboxService:
         page = await self._take(principal, limit, mark_read=mark_read)
         if page.items or wait <= 0:
             return page
-        # The subscription comes first, so an item between the read and the wait is not lost.
-        subscription = await self._events.open(principal.account_id)
-        waiting = subscription.frames(self._clock, wait)
-        try:
-            page = await self._take(principal, limit, mark_read=mark_read)
-            if page.items:
-                return page
-            async for frame in waiting:
-                if frames.can_change_inbox(frame, principal.key_id):
-                    page = await self._take(principal, limit, mark_read=mark_read)
-                    if page.items or frames.is_key_deleted(frame):
-                        return page
-        finally:
-            await waiting.aclose()
-            subscription.close()
-        return await self._take(principal, limit, mark_read=mark_read)
+        with self._waits.take(principal):
+            # The subscription comes first, so an item between the read and the wait is not lost.
+            subscription = await self._events.open(principal.account_id)
+            waiting = subscription.frames(self._clock, wait)
+            try:
+                page = await self._take(principal, limit, mark_read=mark_read)
+                if page.items:
+                    return page
+                async for frame in waiting:
+                    if frames.can_change_inbox(frame, principal.key_id):
+                        page = await self._take(principal, limit, mark_read=mark_read)
+                        if page.items or frames.is_key_deleted(frame):
+                            return page
+            finally:
+                await waiting.aclose()
+                subscription.close()
+            return await self._take(principal, limit, mark_read=mark_read)
 
     async def view(self, principal: AccountPrincipal, key_id: KeyId) -> InboxPage:
         """The newest items of a key with their read state, for the person. Nothing becomes read."""

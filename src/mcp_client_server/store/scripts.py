@@ -10,36 +10,6 @@ local p = ARGV[1]
 local STATUSES = {'todo', 'in_progress', 'done', 'cancelled'}
 local function is_open(s) return s == 'todo' or s == 'in_progress' end
 local QUESTION_STATUSES = {'pending', 'answered', 'expired', 'cancelled'}
--- Deletes the inbox of one key.
-local function drop_inbox(keyk)
-  local base = keyk .. ':inbox'
-  local ids = redis.call('ZRANGE', base, 0, -1)
-  for i = 1, #ids, 500 do
-    local docs = {}
-    for j = i, math.min(i + 499, #ids) do docs[#docs + 1] = p .. ':inb:' .. ids[j] end
-    redis.call('DEL', unpack(docs))
-  end
-  redis.call('DEL', base, base .. ':unread', base .. ':read')
-end
--- Deletes the questions of one key. `acck` is the account key, or false if the account indexes go away with it.
-local function drop_questions(keyk, acck)
-  for _, s in ipairs(QUESTION_STATUSES) do
-    local idx = keyk .. ':qst:' .. s
-    local ids = redis.call('ZRANGE', idx, 0, -1)
-    for i = 1, #ids, 500 do
-      local chunk, docs = {}, {}
-      for j = i, math.min(i + 499, #ids) do
-        chunk[#chunk + 1] = ids[j]
-        docs[#docs + 1] = p .. ':qst:' .. ids[j]
-      end
-      redis.call('DEL', unpack(docs))
-      redis.call('ZREM', p .. ':qexp', unpack(chunk))
-      redis.call('ZREM', p .. ':qclosed', unpack(chunk))
-      if acck then redis.call('ZREM', acck .. ':qst:' .. s, unpack(chunk)) end
-    end
-    redis.call('DEL', idx)
-  end
-end
 """
 
 AUTH = """
@@ -164,77 +134,123 @@ redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[10])
 return 'ok'
 """
 
-KEY_DELETE = (
+KEY_DETACH = (
     _COMMON
     + """
--- ARGV: prefix, account, key, event
--- Returns false if the key is not there, else {task json, activity pairs} for each task with a Live Activity.
+-- ARGV: prefix, account, key, now, event
+-- Returns 0 if the account has no such key, 2 if the key is detached already, else 1.
+-- After this call nobody can use the key: its credential is gone, the account does not list it, and the
+-- account indexes have no task and no question of it. Its data stays for KEY_PURGE, which runs in steps.
 local aid, kid = ARGV[2], ARGV[3]
 local keyk = p .. ':key:' .. kid
-local h = redis.call('HMGET', keyk, 'account_id', 'cred')
-if h[1] ~= aid then return false end
-local acc_tasks = p .. ':acc:' .. aid .. ':tasks'
-local key_tasks = keyk .. ':tasks'
-local ids = redis.call('ZRANGE', key_tasks, 0, -1)
-local ended = {}
-for i = 1, #ids, 500 do
-  local chunk, tkeys = {}, {}
-  for j = i, math.min(i + 499, #ids) do
-    local id = ids[j]
-    local lak = p .. ':la:' .. id
-    local la = redis.call('HGETALL', lak)
-    if #la > 0 then
-      ended[#ended + 1] = {redis.call('GET', p .. ':tsk:' .. id), la}
-      redis.call('DEL', lak)
-    end
-    chunk[#chunk + 1] = id
-    tkeys[#tkeys + 1] = p .. ':tsk:' .. id
-    tkeys[#tkeys + 1] = p .. ':tq:' .. id
-  end
-  redis.call('DEL', unpack(tkeys))
-  redis.call('ZREM', p .. ':closed', unpack(chunk))
-  redis.call('ZREM', acc_tasks, unpack(chunk))
-  for _, s in ipairs(STATUSES) do redis.call('ZREM', acc_tasks .. ':' .. s, unpack(chunk)) end
+local h = redis.call('HMGET', keyk, 'account_id', 'cred', 'gc_account')
+if h[1] ~= aid then
+  if h[3] == aid then return 2 end
+  return 0
 end
-drop_questions(keyk, p .. ':acc:' .. aid)
-drop_inbox(keyk)
-redis.call('DEL', keyk, key_tasks, p .. ':touch:' .. kid, p .. ':cred:' .. h[2])
-for _, s in ipairs(STATUSES) do redis.call('DEL', key_tasks .. ':' .. s) end
+if h[2] then redis.call('DEL', p .. ':cred:' .. h[2]) end
+redis.call('HDEL', keyk, 'account_id', 'cred')
+redis.call('HSET', keyk, 'gc_account', aid)
 redis.call('ZREM', p .. ':acc:' .. aid .. ':keys', kid)
-redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[4])
-return ended
+redis.call('DEL', p .. ':touch:' .. kid)
+-- Native set differences: no loop over the tasks here.
+local acc_tasks, key_tasks = p .. ':acc:' .. aid .. ':tasks', keyk .. ':tasks'
+redis.call('ZDIFFSTORE', acc_tasks, 2, acc_tasks, key_tasks)
+for _, s in ipairs(STATUSES) do
+  redis.call('ZDIFFSTORE', acc_tasks .. ':' .. s, 2, acc_tasks .. ':' .. s, key_tasks .. ':' .. s)
+end
+for _, s in ipairs(QUESTION_STATUSES) do
+  local aq = p .. ':acc:' .. aid .. ':qst:' .. s
+  redis.call('ZDIFFSTORE', aq, 2, aq, keyk .. ':qst:' .. s)
+end
+redis.call('ZADD', p .. ':gc:keys', ARGV[4], kid)
+redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[5])
+return 1
 """
 )
 
-ACCOUNT_DELETE = (
+KEY_PURGE = (
     _COMMON
     + """
--- ARGV: prefix, account, event
+-- ARGV: prefix, key, batch
+-- Deletes up to `batch` items of a detached key: its tasks first, then its questions, then its inbox.
+-- Returns {'more' or 'done', then {task json, activity pairs} for each deleted task that had a Live Activity}.
+-- A key that is in use is never touched: only KEY_DETACH or ACCOUNT_DETACH marks a key for this.
+local kid, batch = ARGV[2], tonumber(ARGV[3])
+local keyk = p .. ':key:' .. kid
+if redis.call('HEXISTS', keyk, 'gc_account') == 0 then return {'done'} end
+local out = {'more'}
+local key_tasks = keyk .. ':tasks'
+local ids = redis.call('ZRANGE', key_tasks, 0, batch - 1)
+if #ids > 0 then
+  local docs = {}
+  for _, id in ipairs(ids) do
+    local lak = p .. ':la:' .. id
+    local la = redis.call('HGETALL', lak)
+    if #la > 0 then out[#out + 1] = {redis.call('GET', p .. ':tsk:' .. id), la} end
+    docs[#docs + 1] = p .. ':tsk:' .. id
+    docs[#docs + 1] = lak
+    docs[#docs + 1] = p .. ':tq:' .. id
+  end
+  redis.call('DEL', unpack(docs))
+  redis.call('ZREM', p .. ':closed', unpack(ids))
+  redis.call('ZREM', key_tasks, unpack(ids))
+  for _, s in ipairs(STATUSES) do redis.call('ZREM', key_tasks .. ':' .. s, unpack(ids)) end
+  return out
+end
+for _, s in ipairs(QUESTION_STATUSES) do
+  local idx = keyk .. ':qst:' .. s
+  local qids = redis.call('ZRANGE', idx, 0, batch - 1)
+  if #qids > 0 then
+    local docs = {}
+    for _, id in ipairs(qids) do docs[#docs + 1] = p .. ':qst:' .. id end
+    redis.call('DEL', unpack(docs))
+    redis.call('ZREM', p .. ':qexp', unpack(qids))
+    redis.call('ZREM', p .. ':qclosed', unpack(qids))
+    redis.call('ZREM', idx, unpack(qids))
+    return out
+  end
+end
+local base = keyk .. ':inbox'
+local iids = redis.call('ZRANGE', base, 0, batch - 1)
+if #iids > 0 then
+  local docs = {}
+  for _, id in ipairs(iids) do docs[#docs + 1] = p .. ':inb:' .. id end
+  redis.call('DEL', unpack(docs))
+  redis.call('ZREM', base, unpack(iids))
+  redis.call('ZREM', base .. ':unread', unpack(iids))
+  redis.call('ZREM', base .. ':read', unpack(iids))
+  return out
+end
+redis.call('DEL', keyk, key_tasks, base, base .. ':unread', base .. ':read')
+for _, s in ipairs(STATUSES) do redis.call('DEL', key_tasks .. ':' .. s) end
+for _, s in ipairs(QUESTION_STATUSES) do redis.call('DEL', keyk .. ':qst:' .. s) end
+redis.call('ZREM', p .. ':gc:keys', kid)
+out[1] = 'done'
+return out
+"""
+)
+
+ACCOUNT_DETACH = (
+    _COMMON
+    + """
+-- ARGV: prefix, account, now, event
+-- Returns 0 if there is no such account, else the IDs of its keys. After this call nobody can use the account:
+-- its credentials, devices, and indexes are gone, and each key waits for KEY_PURGE.
 local aid = ARGV[2]
 local acck = p .. ':acc:' .. aid
 local cred = redis.call('HGET', acck, 'cred')
 if not cred then return 0 end
-local acc_tasks = acck .. ':tasks'
-local ids = redis.call('ZRANGE', acc_tasks, 0, -1)
-for i = 1, #ids, 500 do
-  local chunk, keys = {}, {}
-  for j = i, math.min(i + 499, #ids) do
-    chunk[#chunk + 1] = ids[j]
-    keys[#keys + 1] = p .. ':tsk:' .. ids[j]
-    keys[#keys + 1] = p .. ':la:' .. ids[j]
-    keys[#keys + 1] = p .. ':tq:' .. ids[j]
-  end
-  redis.call('DEL', unpack(keys))
-  redis.call('ZREM', p .. ':closed', unpack(chunk))
-end
-for _, kid in ipairs(redis.call('ZRANGE', acck .. ':keys', 0, -1)) do
+redis.call('DEL', p .. ':cred:' .. cred)
+local kids = redis.call('ZRANGE', acck .. ':keys', 0, -1)
+for _, kid in ipairs(kids) do
   local keyk = p .. ':key:' .. kid
   local kc = redis.call('HGET', keyk, 'cred')
   if kc then redis.call('DEL', p .. ':cred:' .. kc) end
-  drop_questions(keyk, false)
-  drop_inbox(keyk)
-  redis.call('DEL', keyk, keyk .. ':tasks', p .. ':touch:' .. kid)
-  for _, s in ipairs(STATUSES) do redis.call('DEL', keyk .. ':tasks:' .. s) end
+  redis.call('HDEL', keyk, 'account_id', 'cred')
+  redis.call('HSET', keyk, 'gc_account', aid)
+  redis.call('DEL', p .. ':touch:' .. kid)
+  redis.call('ZADD', p .. ':gc:keys', ARGV[3], kid)
 end
 for _, did in ipairs(redis.call('SMEMBERS', acck .. ':devices')) do
   local devk = p .. ':dev:' .. aid .. ':' .. did
@@ -246,11 +262,13 @@ for _, did in ipairs(redis.call('SMEMBERS', acck .. ':devices')) do
 end
 local attested = redis.call('HGET', acck, 'attest_key_id')
 if attested then redis.call('DEL', p .. ':attk:' .. attested) end
-redis.call('DEL', acck, acck .. ':keys', acck .. ':devices', acc_tasks, p .. ':cred:' .. cred)
-for _, s in ipairs(STATUSES) do redis.call('DEL', acc_tasks .. ':' .. s) end
-for _, s in ipairs(QUESTION_STATUSES) do redis.call('DEL', acck .. ':qst:' .. s) end
-redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[3])
-return 1
+-- UNLINK frees a large index in the background.
+local acc_tasks = acck .. ':tasks'
+redis.call('UNLINK', acck, acck .. ':keys', acck .. ':devices', acc_tasks)
+for _, s in ipairs(STATUSES) do redis.call('UNLINK', acc_tasks .. ':' .. s) end
+for _, s in ipairs(QUESTION_STATUSES) do redis.call('UNLINK', acck .. ':qst:' .. s) end
+redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[4])
+return kids
 """
 )
 
@@ -338,6 +356,38 @@ redis.call('DEL', lak, tqk)
 redis.call('PUBLISH', p .. ':ev:' .. aid, ARGV[7])
 return {la, questions}
 """
+
+TASK_EVICT = (
+    _COMMON
+    + """
+-- ARGV: prefix, account, key, closed cap
+-- Removes the oldest closed task of the key when the key has more than the cap of them.
+-- Returns false, or {task id, pending question ids} of the removed task.
+local aid, kid, cap = ARGV[2], ARGV[3], tonumber(ARGV[4])
+local keyk = p .. ':key:' .. kid
+local closed = tonumber(redis.call('HGET', keyk, 'n:done') or '0')
+  + tonumber(redis.call('HGET', keyk, 'n:cancelled') or '0')
+if closed <= cap then return false end
+local best, bscore, bstatus
+for _, s in ipairs({'done', 'cancelled'}) do
+  local head = redis.call('ZRANGE', keyk .. ':tasks:' .. s, 0, 0, 'WITHSCORES')
+  if #head > 0 and (not best or tonumber(head[2]) < bscore) then
+    best, bscore, bstatus = head[1], tonumber(head[2]), s
+  end
+end
+if not best then return false end
+local questions = redis.call('ZRANGE', p .. ':tq:' .. best, 0, -1)
+redis.call('DEL', p .. ':tsk:' .. best, p .. ':la:' .. best, p .. ':tq:' .. best)
+local kt, at = keyk .. ':tasks', p .. ':acc:' .. aid .. ':tasks'
+redis.call('ZREM', kt, best)
+redis.call('ZREM', at, best)
+redis.call('ZREM', kt .. ':' .. bstatus, best)
+redis.call('ZREM', at .. ':' .. bstatus, best)
+redis.call('ZREM', p .. ':closed', best)
+redis.call('HINCRBY', keyk, 'n:' .. bstatus, -1)
+return {best, questions}
+"""
+)
 
 TASK_PAGE = """
 -- ARGV: index zset, task key prefix, count, cursor score ('' = from the top), cursor id, statuses...

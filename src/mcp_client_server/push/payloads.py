@@ -128,13 +128,22 @@ ActivityStartAps = TypedDict(
         "timestamp": int,
         "event": Literal["start"],
         "content-state": ContentState,
+        "stale-date": int,
+        "relevance-score": int,
         "attributes-type": str,
         "attributes": ActivityAttributes,
         "alert": Alert,
     },
 )
 ActivityUpdateAps = TypedDict(
-    "ActivityUpdateAps", {"timestamp": int, "event": Literal["update"], "content-state": ContentState}
+    "ActivityUpdateAps",
+    {
+        "timestamp": int,
+        "event": Literal["update"],
+        "content-state": ContentState,
+        "stale-date": int,
+        "relevance-score": int,
+    },
 )
 ActivityEndAps = TypedDict(
     "ActivityEndAps",
@@ -283,12 +292,21 @@ def content_state(task: Task, question: Question | None) -> ContentState:
     }
 
 
+def relevance_score(task: Task, question: Question | None) -> int:
+    """Which Live Activity of the account goes first: one that waits for the person, then one that runs."""
+    if question is not None:
+        return 100
+    return 75 if task.status == "in_progress" else 50
+
+
 def activity_start(task: Task, key_label: str, now: float, question: Question | None = None) -> ActivityStartPayload:
     return {
         "aps": {
             "timestamp": int(now),
             "event": "start",
             "content-state": content_state(task, question),
+            "stale-date": int(now) + limits.LIVE_ACTIVITY_STALE_SECONDS,
+            "relevance-score": relevance_score(task, question),
             "attributes-type": ATTRIBUTES_TYPE,
             "attributes": {"taskID": task.id, "keyLabel": key_label},
             # ActivityKit shows a push-to-start only if it has an alert.
@@ -298,8 +316,15 @@ def activity_start(task: Task, key_label: str, now: float, question: Question | 
 
 
 def activity_update(task: Task, now: float, question: Question | None = None) -> ActivityUpdatePayload:
-    state = content_state(task, question)
-    return {"aps": {"timestamp": int(now), "event": "update", "content-state": state}}
+    return {
+        "aps": {
+            "timestamp": int(now),
+            "event": "update",
+            "content-state": content_state(task, question),
+            "stale-date": int(now) + limits.LIVE_ACTIVITY_STALE_SECONDS,
+            "relevance-score": relevance_score(task, question),
+        }
+    }
 
 
 def activity_end(task: Task, now: float) -> ActivityEndPayload:

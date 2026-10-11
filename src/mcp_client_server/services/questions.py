@@ -21,6 +21,7 @@ from mcp_client_server.models import (
 from mcp_client_server.push import PushDispatcher, QuestionChange
 from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.scope import own_scope
+from mcp_client_server.services.waits import WaitSlots
 from mcp_client_server.store import Store, StoredQuestion
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ class QuestionService:
         events: EventHub,
         push: PushDispatcher,
         inbox: InboxService,
+        waits: WaitSlots,
         clock: Clock,
         ids: IdSource,
         limits: Limits,
@@ -60,6 +62,7 @@ class QuestionService:
         self._events = events
         self._push = push
         self._inbox = inbox
+        self._waits = waits
         self._clock = clock
         self._ids = ids
         self._limits = limits
@@ -110,23 +113,24 @@ class QuestionService:
         question = await self._read(principal, question_id)
         if question.status != "pending" or wait <= 0:
             return question
-        # The subscription comes first, so an answer between the read and the wait is not lost.
-        subscription = await self._events.open(principal.account_id)
-        seconds = min(wait, max(0.0, question.expires_at - self._clock.now()))
-        waiting = subscription.frames(self._clock, seconds)
-        try:
-            question = await self._read(principal, question_id)
-            if question.status != "pending":
-                return question
-            async for frame in waiting:
-                if frames.can_change_question(frame, question_id):
-                    question = await self._read(principal, question_id)
-                    if question.status != "pending":
-                        return question
-        finally:
-            await waiting.aclose()
-            subscription.close()
-        return await self._read(principal, question_id)
+        with self._waits.take(principal):
+            # The subscription comes first, so an answer between the read and the wait is not lost.
+            subscription = await self._events.open(principal.account_id)
+            seconds = min(wait, max(0.0, question.expires_at - self._clock.now()))
+            waiting = subscription.frames(self._clock, seconds)
+            try:
+                question = await self._read(principal, question_id)
+                if question.status != "pending":
+                    return question
+                async for frame in waiting:
+                    if frames.can_change_question(frame, question_id):
+                        question = await self._read(principal, question_id)
+                        if question.status != "pending":
+                            return question
+            finally:
+                await waiting.aclose()
+                subscription.close()
+            return await self._read(principal, question_id)
 
     async def answer(self, principal: AccountPrincipal, question_id: QuestionId, data: QuestionAnswer) -> Question:
         for _ in range(_WRITE_ATTEMPTS):

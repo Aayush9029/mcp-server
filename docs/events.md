@@ -52,5 +52,6 @@ The server closes the stream in these cases. Connect again after each of them, e
 | The client reads too slowly | The end of the stream |
 | The server loses its connection to the store | The end of the stream |
 | The server starts again | The end of the stream |
+| The account has 16 streams on one server process, and opens one more | The end of the oldest stream |
 
 If the store is not available at the time of the connect, the response is `503`. Wait for the seconds in `Retry-After`, then connect again.

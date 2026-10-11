@@ -15,10 +15,12 @@ from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.integrity import IntegrityService
 from mcp_client_server.services.keys import KeyService
 from mcp_client_server.services.maintenance import Maintenance
+from mcp_client_server.services.purge import KeyPurger
 from mcp_client_server.services.questions import QuestionService
 from mcp_client_server.services.seen import SeenMarker
 from mcp_client_server.services.system import SystemService
 from mcp_client_server.services.tasks import TaskService
+from mcp_client_server.services.waits import WaitSlots
 from mcp_client_server.store import Store
 
 
@@ -53,8 +55,10 @@ def build_services(
     attest_roots: Sequence[x509.Certificate],
 ) -> Services:
     seen = SeenMarker(store, clock)
-    inbox = InboxService(store, events, seen, clock, ids, limits)
-    questions = QuestionService(store, events, push, inbox, clock, ids, limits)
+    waits = WaitSlots(limits.max_waits_per_key)
+    purger = KeyPurger(store, push, limits)
+    inbox = InboxService(store, events, seen, waits, clock, ids, limits)
+    questions = QuestionService(store, events, push, inbox, waits, clock, ids, limits)
     return Services(
         settings=settings,
         limits=limits,
@@ -63,11 +67,11 @@ def build_services(
         system=SystemService(store),
         auth=AuthService(store, clock, settings.rate_limit_per_minute, settings.rate_limit_accounts_per_hour),
         integrity=IntegrityService(store, clock, settings, attest_roots),
-        accounts=AccountService(store, clock, ids),
+        accounts=AccountService(store, purger, clock, ids),
         devices=DeviceService(store, clock, limits),
-        keys=KeyService(store, push, clock, ids, limits),
+        keys=KeyService(store, push, purger, clock, ids, limits),
         tasks=TaskService(store, push, questions, inbox, seen, clock, ids, limits),
         inbox=inbox,
         questions=questions,
-        maintenance=Maintenance(store, questions, clock, limits),
+        maintenance=Maintenance(store, questions, purger, clock, limits),
     )

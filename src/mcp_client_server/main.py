@@ -12,6 +12,7 @@ from mcp_client_server import __version__
 from mcp_client_server.api.bodylimit import BodyLimit
 from mcp_client_server.api.errors import install_error_handlers
 from mcp_client_server.api.routes import router as api_router
+from mcp_client_server.api.transport import StrictTransport
 from mcp_client_server.appattest import apple_roots
 from mcp_client_server.clock import Clock, SystemClock
 from mcp_client_server.config import Settings, get_settings
@@ -76,7 +77,9 @@ def build_runtime(
     commands = redis or command_client(settings.redis_url, settings.redis_max_connections)
     subscriber = event_redis or event_client(settings.redis_url)
     store = Store(commands, settings.redis_key_prefix, limits)
-    events = EventHub(lambda: RedisSubscriber(subscriber), store.keys, clock)
+    events = EventHub(
+        lambda: RedisSubscriber(subscriber), store.keys, clock, max_streams=limits.max_streams_per_account
+    )
     push = PushDispatcher(store, push_sender or _push_sender(settings, clock), _topics(settings), clock)
     roots = apple_roots() if attest_roots is None else attest_roots
     services = build_services(settings, store, events, push, clock, ids or UlidSource(), limits, roots)
@@ -135,6 +138,7 @@ def create_app(
     app.state.services = services
     install_error_handlers(app)
     app.add_middleware(BodyLimit)
+    app.add_middleware(StrictTransport, behind_render=services.settings.render)
     app.include_router(api_router)
     app.include_router(site_router(services.settings, services.limits))
     app.router.routes.append(route)

@@ -58,14 +58,19 @@ class EventHub:
         *,
         timing: HubTiming | None = None,
         queue_size: int = 256,
+        max_streams: int = 16,
     ) -> None:
         self._connect = connect
         self._keys = keys
         self._clock = clock
         self._timing = timing or HubTiming()
         self._queue_size = queue_size
+        self._max_streams = max_streams
         self._subscriber = connect()
-        self._listeners: dict[str, set[_Queue]] = {}
+        # The queues of a channel in the order they opened. A dict keeps that order; a set does not.
+        self._listeners: dict[str, dict[_Queue, None]] = {}
+        # The queues of client streams, which the cap of an account is for. A call that waits is not counted.
+        self._streams: dict[str, dict[_Queue, None]] = {}
         self._active: set[str] = set()
         self._confirmed: dict[str, asyncio.Future[None]] = {}
         self._acks: dict[str, deque[asyncio.Future[None]]] = {}
@@ -89,10 +94,17 @@ class EventHub:
     def stream_count(self) -> int:
         return sum(len(queues) for queues in self._listeners.values())
 
-    async def open(self, account_id: AccountId) -> "Subscription":
+    async def open(self, account_id: AccountId, *, client_stream: bool = False) -> "Subscription":
+        """A subscription to the events of the account. `client_stream` counts it against the cap of the account."""
         channel = self._keys.channel(account_id)
         queue: _Queue = asyncio.Queue(self._queue_size)
-        self._listeners.setdefault(channel, set()).add(queue)
+        if client_stream:
+            streams = self._streams.setdefault(channel, {})
+            if len(streams) >= self._max_streams:
+                # The oldest stream of the account ends. Its client connects again and gets the lists again.
+                self._drop(channel, next(iter(streams)))
+            streams[queue] = None
+        self._listeners.setdefault(channel, {})[queue] = None
         try:
             await self._reconcile()
             await self._confirmed_in_time(self._confirmation(channel))
@@ -122,10 +134,15 @@ class EventHub:
 
     def _detach(self, channel: str, queue: _Queue) -> None:
         # No await here: this runs while the stream is being cancelled.
+        streams = self._streams.get(channel)
+        if streams is not None:
+            streams.pop(queue, None)
+            if not streams:
+                del self._streams[channel]
         queues = self._listeners.get(channel)
         if queues is None:
             return
-        queues.discard(queue)
+        queues.pop(queue, None)
         if not queues:
             del self._listeners[channel]
             task = asyncio.create_task(self._reconcile_quietly())
@@ -230,6 +247,7 @@ class EventHub:
             for queue in queues:
                 _end(queue)
         self._listeners.clear()
+        self._streams.clear()
 
     async def _close_subscriber(self) -> None:
         try:

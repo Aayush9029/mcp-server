@@ -7,12 +7,14 @@ from mcp_client_server.events import frames
 from mcp_client_server.ids import AccountId, DeviceId, IdSource, KeyId
 from mcp_client_server.limits import Limits
 from mcp_client_server.models import Account, AccountCreated, AccountPatch, Device, DeviceInput
+from mcp_client_server.services.purge import KeyPurger
 from mcp_client_server.store import AttestedKey, Store
 
 
 class AccountService:
-    def __init__(self, store: Store, clock: Clock, ids: IdSource) -> None:
+    def __init__(self, store: Store, purger: KeyPurger, clock: Clock, ids: IdSource) -> None:
         self._store = store
+        self._purger = purger
         self._clock = clock
         self._ids = ids
 
@@ -36,8 +38,19 @@ class AccountService:
         return account
 
     async def delete(self, principal: AccountPrincipal) -> bool:
-        """Delete the account with all its data. False if there is no such account."""
-        return await self._store.delete_account(principal.account_id, frames.account_deleted())
+        """Delete the account with all its data. False if there is no such account.
+
+        The first step makes the account unusable. The data of each key then goes in bounded steps, and a step
+        that does not run now runs with the next call or in the maintenance loop.
+        """
+        keys = await self._store.detach_account(principal.account_id, self._clock.now(), frames.account_deleted())
+        if keys is None:
+            await self._purger.finish_pending()
+            return False
+        for key_id in keys:
+            await self._purger.purge(key_id)
+        await self._purger.finish_pending()
+        return True
 
     async def account_of_key(self, key_id: KeyId) -> AccountId | None:
         """The account that owns a key, for an operator who has only the key ID from a support request."""

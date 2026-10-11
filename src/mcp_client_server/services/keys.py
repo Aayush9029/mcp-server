@@ -8,6 +8,7 @@ from mcp_client_server.ids import IdSource, KeyId
 from mcp_client_server.limits import LAST_USED_WRITE_INTERVAL_SECONDS, Limits
 from mcp_client_server.models import Agent, ClientInfo, Key, KeyCreate, KeyCreated, KeyPatch
 from mcp_client_server.push import PushDispatcher
+from mcp_client_server.services.purge import KeyPurger
 from mcp_client_server.store import Store
 
 _CLIENT_CACHE_MAX = 10_000
@@ -15,9 +16,12 @@ _CLIENT_FIELD_MAX = 100
 
 
 class KeyService:
-    def __init__(self, store: Store, push: PushDispatcher, clock: Clock, ids: IdSource, limits: Limits) -> None:
+    def __init__(
+        self, store: Store, push: PushDispatcher, purger: KeyPurger, clock: Clock, ids: IdSource, limits: Limits
+    ) -> None:
         self._store = store
         self._push = push
+        self._purger = purger
         self._clock = clock
         self._ids = ids
         self._limits = limits
@@ -66,11 +70,12 @@ class KeyService:
         return key
 
     async def delete(self, principal: AccountPrincipal, key_id: KeyId) -> None:
-        ended = await self._store.delete_key(principal.account_id, key_id, frames.key_deleted(key_id))
-        if ended is None:
+        """The key is unusable after the first step. Its data goes in bounded steps; a retry finishes them."""
+        at = self._clock.now()
+        if not await self._store.detach_key(principal.account_id, key_id, at, frames.key_deleted(key_id)):
             raise NotFound("Key not found.")
         self._recent_clients.pop(key_id, None)
-        self._push.activities_ended(principal.account_id, key_id, ended)
+        await self._purger.purge(key_id, principal.account_id)
 
     async def record_client(self, principal: AgentPrincipal, name: str, version: str) -> None:
         """Keep `last_client` of the key. The store gets one write each minute at most for an unchanged client."""

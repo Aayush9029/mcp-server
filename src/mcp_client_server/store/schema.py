@@ -8,7 +8,9 @@
 {p}:acc:{account}:tasks      zset    task id by updated_at
 {p}:acc:{account}:tasks:{s}  zset    the same, one for each status
 {p}:key:{key}                hash    account_id, label, prefix, last4, created_at, cred,
-                                     last_used_at, client_name, client_version, n:{status}
+                                     last_used_at, client_name, client_version, n:{status};
+                                     a deleted key has gc_account in place of account_id and cred
+{p}:gc:keys                  zset    deleted key id by the time of the deletion, until its data is gone
 {p}:key:{key}:tasks          zset    task id by updated_at
 {p}:key:{key}:tasks:{s}      zset    the same, one for each status
 {p}:tsk:{task}               string  task JSON, the same shape that the API returns
@@ -26,6 +28,8 @@
 {p}:key:{key}:inbox:read     zset    read item id by the time it was read
 {p}:wdg:{account}:{device}   string  WidgetKit push throttle
 {p}:wdgd:{account}:{device}  string  a change came while the throttle was on
+{p}:lat:{task}               string  Live Activity update throttle
+{p}:latd:{task}              string  a change came while that throttle was on
 {p}:attc:{challenge}         string  App Attest challenge that is not used yet
 {p}:attk:{key id}            string  account of an attested key
 {p}:tok:{apns token}         string  "{account}:{device}" that owns the token
@@ -109,6 +113,12 @@ class KeySpace:
     def widget_dirty(self, account_id: AccountId, device_id: DeviceId) -> str:
         return f"{self.prefix}:wdgd:{account_id}:{device_id}"
 
+    def activity_throttle(self, task_id: TaskId) -> str:
+        return f"{self.prefix}:lat:{task_id}"
+
+    def activity_dirty(self, task_id: TaskId) -> str:
+        return f"{self.prefix}:latd:{task_id}"
+
     def attest_challenge(self, challenge: str) -> str:
         return f"{self.prefix}:attc:{challenge}"
 
@@ -121,6 +131,10 @@ class KeySpace:
 
     def rate(self, bucket: str) -> str:
         return f"{self.prefix}:rl:{bucket}"
+
+    @property
+    def keys_to_purge(self) -> str:
+        return f"{self.prefix}:gc:keys"
 
     def lock(self, name: str) -> str:
         return f"{self.prefix}:lock:{name}"

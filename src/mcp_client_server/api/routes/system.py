@@ -12,7 +12,7 @@ _UP = Health(status="ok", store="ok")
 _DOWN = Health(status="unavailable", store="unavailable")
 
 
-@router.get("/health", response_model=None)
+@router.api_route("/health", methods=["GET", "HEAD"], response_model=None)
 async def health(services: ServicesDep) -> JSONResponse:
     if await services.system.store_answers():
         return JSONResponse(_UP.model_dump())
@@ -21,7 +21,7 @@ async def health(services: ServicesDep) -> JSONResponse:
 
 @router.get("/v1/events", response_model=None)
 async def events(principal: AccountAuth, services: ServicesDep) -> StreamingResponse:
-    subscription = await services.events.open(principal.account_id)
+    subscription = await services.events.open(principal.account_id, client_stream=True)
     return StreamingResponse(
         subscription.stream(),
         media_type="text/event-stream",

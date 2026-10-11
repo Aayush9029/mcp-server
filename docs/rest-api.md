@@ -157,7 +157,9 @@ The body of `PUT` has the fields of the [Device](#device) without `id` and `upda
 | `GET` | `/v1/keys` | account | | `200 {"keys": [Key]}`, newest first |
 | `POST` | `/v1/keys` | account | `{"label": "Cursor"}` | `201 {"key": Key, "secret": "mck_..."}` |
 | `PATCH` | `/v1/keys/{key_id}` | account | `{"label": "Cursor (work)"}` | `200 Key` |
-| `DELETE` | `/v1/keys/{key_id}` | account | | `204`. Deletes the key, its tasks, and its questions. |
+| `DELETE` | `/v1/keys/{key_id}` | account | | `204`. Deletes the key, its tasks, its questions, and its inbox. |
+
+A deleted key, or a deleted account, is unusable when the response comes: its credential is refused, and no route returns its data. The server removes the data itself in small steps after that, and finishes a deletion that stopped.
 
 ## Tasks
 
@@ -256,6 +258,7 @@ A key can have 20 pending questions. One more gives `409`.
 - The response is the Question in each case. Look at `status`.
 - If `expires_at` comes before the end of the wait, the request returns at that time with the status `expired`.
 - If the result is still `pending`, send the request again.
+- A key can have 32 requests that wait at the same time on one server process, over this route and `GET /v1/inbox?wait=`. One more gets `429` with `Retry-After`. A request with `wait=0` is not counted.
 
 ### Answer a question
 

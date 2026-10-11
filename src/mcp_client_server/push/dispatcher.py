@@ -6,7 +6,7 @@ from typing import Literal, Protocol
 
 from mcp_client_server.clock import Clock
 from mcp_client_server.ids import AccountId, DeviceId, KeyId, TaskId
-from mcp_client_server.limits import WIDGET_PUSH_INTERVAL_SECONDS
+from mcp_client_server.limits import LIVE_ACTIVITY_UPDATE_INTERVAL_SECONDS, WIDGET_PUSH_INTERVAL_SECONDS
 from mcp_client_server.models import CLOSED_STATUSES, Device, PatchField, Question, Task
 from mcp_client_server.push import payloads
 from mcp_client_server.push.apns import PushSender
@@ -20,6 +20,9 @@ ChangeKind = Literal["created", "updated", "deleted"]
 _LIVE_FIELDS: frozenset[PatchField] = frozenset({"title", "status", "progress", "status_note"})
 # A change of only these fields is a progress tick. It updates the devices but does not alert the person.
 _QUIET_FIELDS: frozenset[PatchField] = frozenset({"progress", "status_note"})
+# Each Live Activity push has this priority. A priority of 5 can wait for a long time on a locked device, so the
+# progress on the Lock Screen would not move. The throttle on the task keeps the number of pushes in the budget.
+_ACTIVITY_PRIORITY: Literal[10] = 10
 _STATUS_SUBTITLES = {"in_progress": "Task started", "done": "Task done", "cancelled": "Task cancelled"}
 _EVENTS: dict[ChangeKind, TaskEvent] = {
     "created": "task.created",
@@ -59,6 +62,14 @@ class PushStore(Protocol):
     async def take_widget_mark(self, account_id: AccountId, device_id: DeviceId) -> bool: ...
 
     async def widget_throttled(self, account_id: AccountId, device_id: DeviceId) -> bool: ...
+
+    async def activity_slot(self, task_id: TaskId) -> bool: ...
+
+    async def renew_activity_slot(self, task_id: TaskId) -> None: ...
+
+    async def activity_throttled(self, task_id: TaskId) -> bool: ...
+
+    async def take_activity_mark(self, task_id: TaskId) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +130,11 @@ def starts_activity(change: TaskChange) -> bool:
     return change.kind == "created" or (change.kind == "updated" and "status" in change.changed)
 
 
+def updates_activity(change: TaskChange) -> bool:
+    """True for a change that a running Live Activity shows. The dispatcher sends it through the throttle."""
+    return change.kind == "updated" and bool(change.changed & _LIVE_FIELDS) and not ends_activity(change)
+
+
 def plan_task_pushes(change: TaskChange, ctx: PushContext, topics: Topics, at: float) -> list[PushRequest]:
     task = change.task
     event = _EVENTS[change.kind]
@@ -176,13 +192,8 @@ def _plan_activity_pushes(change: TaskChange, ctx: PushContext, topics: Topics, 
         end = payloads.activity_end(task, at)
         return [_activity_request(device, token, "activity", task, end, topics, 10) for device, token in live]
 
+    # An `update` is not planned here: the dispatcher sends it through the throttle of the task.
     requests: list[PushRequest] = []
-    if change.kind == "updated" and change.changed & _LIVE_FIELDS:
-        update = payloads.activity_update(task, at, ctx.question)
-        priority: Literal[5, 10] = 5 if change.changed <= _QUIET_FIELDS else 10
-        requests += [
-            _activity_request(device, token, "activity", task, update, topics, priority) for device, token in live
-        ]
     if starts_activity(change):
         start = payloads.activity_start(task, ctx.key_label, at, ctx.question)
         running = {device.id for device, _ in live}
@@ -192,6 +203,19 @@ def _plan_activity_pushes(change: TaskChange, ctx: PushContext, topics: Topics, 
             if device.push_to_start_token and device.id not in running
         ]
     return requests
+
+
+def plan_activity_update(task: Task, ctx: PushContext, topics: Topics, at: float) -> list[PushRequest]:
+    """The latest state of the task to each registered activity of it."""
+    if not ctx.live_activities:
+        return []
+    devices = {device.id: device for device in ctx.devices}
+    update = payloads.activity_update(task, at, ctx.question)
+    return [
+        _activity_request(devices[device_id], token, "activity", task, update, topics, _ACTIVITY_PRIORITY)
+        for device_id, token in ctx.activities.items()
+        if device_id in devices
+    ]
 
 
 def plan_message(
@@ -214,13 +238,11 @@ def plan_message(
     ]
 
 
-def plan_question_pushes(
-    change: QuestionChange, ctx: PushContext, task: Task | None, topics: Topics, at: float
-) -> list[PushRequest]:
-    """A new question alerts each device. A status change removes the alert. The Live Activity of the task follows."""
+def plan_question_pushes(change: QuestionChange, ctx: PushContext, topics: Topics, at: float) -> list[PushRequest]:
+    """A new question alerts each device. A status change removes the alert."""
     question = change.question
     asked = payloads.question_asked(question, ctx.key_label) if change.kind == "created" else None
-    requests = [
+    return [
         PushRequest(
             token=device.apns_token,
             environment=device.apns_environment,
@@ -236,15 +258,6 @@ def plan_question_pushes(
         for device in ctx.devices
         if device.apns_token
     ]
-    if task and ctx.live_activities:
-        devices = {device.id: device for device in ctx.devices}
-        update = payloads.activity_update(task, at, ctx.question)
-        requests += [
-            _activity_request(devices[device_id], token, "activity", task, update, topics, 10)
-            for device_id, token in ctx.activities.items()
-            if device_id in devices
-        ]
-    return requests
 
 
 def widget_request(device: Device, token: str, topics: Topics) -> PushRequest:
@@ -295,6 +308,8 @@ class PushDispatcher:
         self._jobs: set[asyncio.Task[None]] = set()
         # One for each device with a WidgetKit throttle that this process started. It sends the push that waited.
         self._widget_windows: dict[tuple[AccountId, DeviceId], asyncio.Task[None]] = {}
+        # The same for each task with a Live Activity update throttle.
+        self._activity_windows: dict[TaskId, asyncio.Task[None]] = {}
         self._dropped = 0
 
     @property
@@ -339,7 +354,7 @@ class PushDispatcher:
             for job in tuple(self._jobs):
                 job.cancel()
             await asyncio.gather(*tuple(self._jobs), return_exceptions=True)
-        windows = tuple(self._widget_windows.values())
+        windows = (*self._widget_windows.values(), *self._activity_windows.values())
         for window in windows:
             window.cancel()
         await asyncio.gather(*windows, return_exceptions=True)
@@ -356,6 +371,8 @@ class PushDispatcher:
         if ends_activity(change):
             await self._store.clear_activities(task.id)
             return
+        if updates_activity(change) and ctx.live_activities:
+            await self._update_activity(account_id, task.key_id, task.id)
         known = {device.id for device in ctx.devices}
         for device_id in ctx.activities.keys() - known:
             await self._store.forget_activity(task.id, device_id)
@@ -363,11 +380,48 @@ class PushDispatcher:
     async def _question_changed(self, account_id: AccountId, change: QuestionChange) -> None:
         question = change.question
         ctx = await self._store.push_context(account_id, question.key_id, question.task_id)
-        stored = await self._store.get_task_unscoped(question.task_id) if question.task_id and ctx.activities else None
-        task = stored.task if stored else None
-        requests = plan_question_pushes(change, ctx, task, self._topics, self._clock.now())
-        await self._deliver(account_id, requests)
+        await self._deliver(account_id, plan_question_pushes(change, ctx, self._topics, self._clock.now()))
         await self._reload_widgets(account_id, ctx.devices)
+        if question.task_id and ctx.activities and ctx.live_activities:
+            await self._update_activity(account_id, question.key_id, question.task_id)
+
+    async def _update_activity(self, account_id: AccountId, key_id: KeyId, task_id: TaskId) -> None:
+        """Send the latest state of the task to its Live Activity, one time in each interval at most.
+
+        A change in the interval marks the task, and the window of the task sends the state that is then
+        current when the interval ends. So the last change is never lost, and the activity shows it promptly.
+        """
+        if await self._store.activity_slot(task_id):
+            await self._send_activity_update(account_id, key_id, task_id)
+            self._open_activity_window(account_id, key_id, task_id)
+
+    async def _send_activity_update(self, account_id: AccountId, key_id: KeyId, task_id: TaskId) -> None:
+        stored = await self._store.get_task_unscoped(task_id)
+        if stored is None:
+            return
+        ctx = await self._store.push_context(account_id, key_id, task_id)
+        await self._deliver(account_id, plan_activity_update(stored.task, ctx, self._topics, self._clock.now()))
+
+    def _open_activity_window(self, account_id: AccountId, key_id: KeyId, task_id: TaskId) -> None:
+        if task_id in self._activity_windows:
+            return
+        window = asyncio.create_task(self._activity_window(account_id, key_id, task_id))
+        self._activity_windows[task_id] = window
+        window.add_done_callback(lambda _: self._activity_windows.pop(task_id, None))
+
+    async def _activity_window(self, account_id: AccountId, key_id: KeyId, task_id: TaskId) -> None:
+        while True:
+            await self._clock.sleep(LIVE_ACTIVITY_UPDATE_INTERVAL_SECONDS)
+            try:
+                if not await self._store.take_activity_mark(task_id):
+                    if await self._store.activity_throttled(task_id):
+                        continue
+                    return
+                await self._store.renew_activity_slot(task_id)
+                await self._send_activity_update(account_id, key_id, task_id)
+            except Exception:
+                logger.exception("Live Activity update for task %s failed", task_id)
+                return
 
     async def _reload_widgets(self, account_id: AccountId, devices: list[Device]) -> None:
         requests: list[PushRequest] = []

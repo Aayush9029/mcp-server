@@ -77,6 +77,7 @@ A read of the task with the REST API does not set `seen_at`. The first time coun
 
 - `unread` is the number of unread items that stay in the inbox after the call.
 - A request that waits returns `{"items": [], "unread": 0}` after its time. Send it again.
+- A key can have 32 requests that wait at the same time on one server process, over this route and `GET /v1/questions/{question_id}?wait=`. One more gets `429` with `Retry-After`.
 - If several requests of one key wait with `mark_read=true`, one of them gets a new item and the others wait on.
 
 ### Send a message

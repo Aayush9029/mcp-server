@@ -330,7 +330,7 @@ async def test_many_calls_wait_at_once_and_hold_no_store_connection(launch: Laun
     pool = {"own_connections": True, "redis_max_connections": 2} if store_url else {}
     # The plain test client for fakeredis has a small pool that does not queue, so fewer calls start at once.
     count = 100 if store_url else 40
-    async with launch(**pool) as running:
+    async with launch(limits=Limits(max_waits_per_key=count), **pool) as running:
         api = running.api
         account, key, _ = await api.agent()
         question = await api.ask(key)
@@ -474,9 +474,17 @@ async def test_the_live_activity_of_the_task_shows_its_oldest_pending_question(r
     await api.live_activity(account, task["id"], DEVICE_A)
     await running.pushes_done()
 
-    async def shown() -> list[Json | None]:
-        """The `question` of each Live Activity push since the last call."""
+    async def shown(*, flush: bool = True) -> list[Json | None]:
+        """The `question` of each Live Activity push since the last call.
+
+        With `flush`, the interval of the update throttle ends first, so the update that waited goes.
+        """
         await running.pushes_done()
+        if flush:
+            await running.clock.sleeping(5)
+            running.clock.advance(5)
+            await running.push.sent_of("liveactivity", 1)
+            await running.pushes_done()
         updates = push.payloads("liveactivity")
         assert {update["aps"]["event"] for update in updates} <= {"update"}
         push.sent.clear()
@@ -487,13 +495,14 @@ async def test_the_live_activity_of_the_task_shows_its_oldest_pending_question(r
     first_state = {"id": first["id"], "prompt": "Deploy now?", "kind": "confirm", "options": ["Yes", "No"]}
     await running.pushes_done()
     assert [request.priority for request in push.of_type("liveactivity")] == [10]
-    assert await shown() == [first_state]
+    assert await shown(flush=False) == [first_state]
 
     second = await api.ask(key, kind="text", prompt="Which branch?", task_id=task["id"])
     assert await shown() == [first_state]
     await api.ask(key, task_id=other_task["id"])
     await api.ask(key)
-    assert await shown() == []
+    await settle()
+    assert await shown(flush=False) == []
 
     # A change of the task keeps the question in the content state.
     await api.patch(key, task["id"], progress=50)

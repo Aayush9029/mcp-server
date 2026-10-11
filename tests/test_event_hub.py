@@ -35,8 +35,10 @@ def bus(clock: FakeClock) -> FakeBus:
 async def start_hub(bus: FakeBus, clock: FakeClock) -> AsyncIterator[StartHub]:
     hubs: list[EventHub] = []
 
-    def start(*, queue_size: int = 16, **timing: float) -> EventHub:
-        hub = EventHub(bus.connect, KEYS, clock, timing=HubTiming(**timing), queue_size=queue_size)
+    def start(*, queue_size: int = 16, max_streams: int = 16, **timing: float) -> EventHub:
+        hub = EventHub(
+            bus.connect, KEYS, clock, timing=HubTiming(**timing), queue_size=queue_size, max_streams=max_streams
+        )
         hubs.append(hub)
         return hub
 
@@ -130,6 +132,27 @@ async def test_account_deleted_is_sent_and_then_the_stream_ends(hub: EventHub, b
 
     assert await rest(subscription) == [frames.ready(MINE), event(1), frames.account_deleted()]
     assert hub.stream_count == 0
+
+
+async def test_one_stream_above_the_limit_of_an_account_ends_the_oldest_stream(
+    start_hub: StartHub, bus: FakeBus
+) -> None:
+    hub = start_hub(max_streams=2)
+    await hub.start()
+    first = await hub.open(MINE, client_stream=True)
+    second = await hub.open(MINE, client_stream=True)
+    theirs = await hub.open(THEIRS, client_stream=True)
+    waiting = await hub.open(MINE)
+    third = await hub.open(MINE, client_stream=True)
+    bus.publish(KEYS.channel(MINE), event(1))
+
+    assert await rest(first) == [frames.ready(MINE)]
+    assert hub.stream_count == 4
+    # A call that waits is not a client stream: it does not count, and it is not the one that ends.
+    assert await take(waiting, 2) == [frames.ready(MINE), event(1)]
+    assert await take(second, 2) == [frames.ready(MINE), event(1)]
+    assert await take(third, 2) == [frames.ready(MINE), event(1)]
+    assert await take(theirs, 1) == [frames.ready(THEIRS)]
 
 
 async def test_account_deleted_reaches_a_stream_whose_queue_it_fills(start_hub: StartHub, bus: FakeBus) -> None:

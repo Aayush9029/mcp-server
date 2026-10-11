@@ -21,6 +21,7 @@ from tests.support import (
     START_TOKEN,
     WIDGET_TOKEN,
     FakeClock,
+    Json,
     RecordingPushSender,
     Running,
     make_device,
@@ -60,15 +61,21 @@ async def test_a_task_goes_through_its_life_and_each_device_gets_the_right_pushe
     await running.pushes_done()
     assert (len(push.of_type("background")), push.of_type("alert")) == (2, [])
     updates = push.of_type("liveactivity")
-    assert [(r.token, r.priority) for r in updates] == [(ACTIVITY_TOKEN, 5)]
+    assert [(r.token, r.priority) for r in updates] == [(ACTIVITY_TOKEN, 10)]
     state = payload_json(updates[0])["aps"]["content-state"]
     assert (state["progress"], state["note"]) == (60, "Half done")
 
+    # The next change comes in the interval of the throttle: its update goes when the interval ends.
     push.sent.clear()
     await api.patch(account, created["id"], title="Renamed by the app")
     await running.pushes_done()
     assert (len(push.of_type("background")), push.of_type("alert")) == (2, [])
+    assert push.of_type("liveactivity") == []
+    await running.clock.sleeping(5)
+    running.clock.advance(5)
+    await running.push.sent_of("liveactivity", 1)
     assert [payload["aps"]["event"] for payload in push.payloads("liveactivity")] == ["update"]
+    assert push.payloads("liveactivity")[0]["aps"]["content-state"]["title"] == "Renamed by the app"
 
     push.sent.clear()
     await api.patch(key, created["id"], status="done")
@@ -264,6 +271,18 @@ class SlowStore:
     async def widget_throttled(self, account_id: AccountId, device_id: DeviceId) -> bool:
         raise AssertionError("not used")
 
+    async def activity_slot(self, task_id: TaskId) -> bool:
+        raise AssertionError("not used")
+
+    async def renew_activity_slot(self, task_id: TaskId) -> None:
+        raise AssertionError("not used")
+
+    async def activity_throttled(self, task_id: TaskId) -> bool:
+        raise AssertionError("not used")
+
+    async def take_activity_mark(self, task_id: TaskId) -> bool:
+        raise AssertionError("not used")
+
 
 async def test_jobs_above_the_pending_limit_are_dropped_and_the_caller_does_not_wait(
     clock: FakeClock, push: RecordingPushSender, caplog: pytest.LogCaptureFixture
@@ -374,3 +393,77 @@ def test_a_watch_gets_the_widget_push_on_the_topic_of_the_watch_app() -> None:
         "sandbox",
         "widgets",
     )
+
+
+async def activity_updates(running: Running) -> list[Json]:
+    """The Live Activity `update` payloads since the last call, after the push jobs are done."""
+    await running.pushes_done()
+    sent = running.push.payloads("liveactivity")
+    running.push.sent.clear()
+    return [payload for payload in sent if payload["aps"]["event"] == "update"]
+
+
+async def interval_ends(running: Running) -> None:
+    """The window of the throttle sleeps for the interval; then the interval ends."""
+    await running.clock.sleeping(5)
+    running.clock.advance(5)
+
+
+async def test_a_chatty_agent_gives_one_live_activity_update_in_5_seconds_with_the_latest_state(
+    running: Running,
+) -> None:
+    api, push = running.api, running.push
+    account, key, _ = await api.agent()
+    await api.device(account, DEVICE_A)
+    task = await api.task(key, status="in_progress", notify=False)
+    await api.live_activity(account, task["id"], DEVICE_A)
+    await running.pushes_done()
+    push.sent.clear()
+
+    await api.patch(key, task["id"], progress=1, status_note="Step 1")
+    # The first tick goes at once, at the priority that reaches a locked device.
+    first = await activity_updates(running)
+    assert [(p["aps"]["content-state"]["progress"], p["aps"]["content-state"]["note"]) for p in first] == [
+        (1, "Step 1")
+    ]
+    assert first[0]["aps"]["stale-date"] == first[0]["aps"]["timestamp"] + 30 * 60
+    assert first[0]["aps"]["relevance-score"] == 75
+    # Progress ticks are silent for the devices, as before.
+    assert push.of_type("alert") == []
+
+    # The 16 ticks in the interval give no push. When the interval ends, one update has the latest state.
+    for progress in range(2, 18):
+        await api.patch(key, task["id"], progress=progress, status_note=f"Step {progress}")
+    assert await activity_updates(running) == []
+    await interval_ends(running)
+    await push.sent_of("liveactivity", 1)
+    trailing = await activity_updates(running)
+    assert [(p["aps"]["content-state"]["progress"], p["aps"]["content-state"]["note"]) for p in trailing] == [
+        (17, "Step 17")
+    ]
+
+    # No change in the next interval: no push. A change after that: one push when its interval ends.
+    await interval_ends(running)
+    await running.clock.sleeping(5)
+    assert await activity_updates(running) == []
+    await api.patch(key, task["id"], progress=50)
+    assert await activity_updates(running) == []
+    running.clock.advance(5)
+    await push.sent_of("liveactivity", 1)
+    assert [p["aps"]["content-state"]["progress"] for p in await activity_updates(running)] == [50]
+
+    # A question of the task raises the relevance of the activity, and goes through the same throttle.
+    await interval_ends(running)
+    await running.clock.sleeping(5)
+    question = await api.ask(key, task_id=task["id"])
+    assert await activity_updates(running) == []
+    running.clock.advance(5)
+    await push.sent_of("liveactivity", 1)
+    asked = await activity_updates(running)
+    assert asked[0]["aps"]["content-state"]["question"]["id"] == question["id"]
+    assert asked[0]["aps"]["relevance-score"] == 100
+
+    # `end` does not wait for the throttle.
+    await api.patch(key, task["id"], status="done")
+    await running.pushes_done()
+    assert [p["aps"]["event"] for p in push.payloads("liveactivity")] == ["end"]

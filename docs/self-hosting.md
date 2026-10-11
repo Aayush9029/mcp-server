@@ -124,7 +124,7 @@ A person who lost the device cannot delete the account in the app. Run this insi
 uv run mcp-client-server admin delete-account --key-id key_01jb2k3v9d
 ```
 
-It deletes the account with all its data, as `DELETE /v1/account` does, and prints only the account ID. The exit code is `1` if there is no such account, and `2` if the store does not answer.
+It deletes the account with all its data, as `DELETE /v1/account` does, and prints only the account ID. The exit code is `1` if there is no such account, and `2` if the store does not answer. The data goes in small steps; if the command stops before the end, run it again, or wait for the maintenance loop of the server.
 
 ## Develop
 

@@ -9,6 +9,7 @@ from mcp_client_server.ids import AccountId, DeviceId, KeyId, QuestionId, TaskId
 from mcp_client_server.limits import (
     ATTEST_CHALLENGE_TTL_SECONDS,
     LAST_USED_WRITE_INTERVAL_SECONDS,
+    LIVE_ACTIVITY_UPDATE_INTERVAL_SECONDS,
     WIDGET_PUSH_INTERVAL_SECONDS,
     Limits,
 )
@@ -87,6 +88,14 @@ class DeletedTask:
 
 
 @dataclass(frozen=True, slots=True)
+class Evicted:
+    """The oldest closed task of a key, removed because the key had more closed tasks than the limit."""
+
+    task_id: TaskId
+    pending_questions: list[QuestionId]
+
+
+@dataclass(frozen=True, slots=True)
 class AttestedKey:
     key_id: str
     public_key: str
@@ -153,11 +162,13 @@ class Store:
         self._device_put = reg(scripts.DEVICE_PUT)
         self._device_delete = reg(scripts.DEVICE_DELETE)
         self._key_create = reg(scripts.KEY_CREATE)
-        self._key_delete = reg(scripts.KEY_DELETE)
-        self._account_delete = reg(scripts.ACCOUNT_DELETE)
+        self._key_detach = reg(scripts.KEY_DETACH)
+        self._key_purge = reg(scripts.KEY_PURGE)
+        self._account_detach = reg(scripts.ACCOUNT_DETACH)
         self._task_create = reg(scripts.TASK_CREATE)
         self._task_update = reg(scripts.TASK_UPDATE)
         self._task_delete = reg(scripts.TASK_DELETE)
+        self._task_evict = reg(scripts.TASK_EVICT)
         self._task_page = reg(scripts.TASK_PAGE)
         self._activity_put = reg(scripts.ACTIVITY_PUT)
         self._activity_delete = reg(scripts.ACTIVITY_DELETE)
@@ -253,8 +264,12 @@ class Store:
         )
         return None if reply is None else _account(text_map(items(reply)[1]))
 
-    async def delete_account(self, account_id: AccountId, event: str) -> bool:
-        return integer(await self._account_delete(args=[self._p, account_id, event])) == 1
+    async def detach_account(self, account_id: AccountId, now: float, event: str) -> list[KeyId] | None:
+        """Make an account unusable at once. Returns its keys, which wait for `purge_key`. None: no such account."""
+        reply = await self._account_detach(args=[self._p, account_id, _score(now), event])
+        if reply == 0:
+            return None
+        return [KeyId(key_id) for key_id in texts(items(reply))]
 
     # Devices
 
@@ -360,17 +375,25 @@ class Store:
         changed, fields = items(reply)
         return _key(key_id, text_map(fields)) if integer(changed) == 1 else None
 
-    async def delete_key(self, account_id: AccountId, key_id: KeyId, event: str) -> list[EndedActivity] | None:
-        """Delete a key and its tasks. Returns the Live Activities of the tasks, or None if the key is not there."""
-        reply = await self._key_delete(args=[self._p, account_id, key_id, event])
-        if reply is None:
-            return None
+    async def detach_key(self, account_id: AccountId, key_id: KeyId, now: float, event: str) -> bool:
+        """Make a key unusable at once. Its data waits for `purge_key`. False if the account has no such key."""
+        reply = integer(await self._key_detach(args=[self._p, account_id, key_id, _score(now), event]))
+        return reply != 0
+
+    async def purge_key(self, key_id: KeyId, batch: int) -> tuple[bool, list[EndedActivity]]:
+        """Delete up to `batch` items of a detached key. Returns (done, the Live Activities of the deleted tasks)."""
+        reply = items(await self._key_purge(args=[self._p, key_id, batch]))
         ended: list[EndedActivity] = []
-        for entry in items(reply):
+        for entry in reply[1:]:
             raw, tokens = items(entry)
             if raw is not None:
                 ended.append(EndedActivity(Task.model_validate_json(text(raw)), _tokens(tokens)))
-        return ended
+        return _one_of(reply[0], "done", "more") == "done", ended
+
+    async def keys_to_purge(self, count: int) -> list[KeyId]:
+        """Detached keys whose data is not all gone yet, oldest first."""
+        reply = await self._kv.call("ZRANGE", self.keys.keys_to_purge, 0, count - 1)
+        return [KeyId(key_id) for key_id in texts(items(reply))]
 
     # Tasks
 
@@ -426,6 +449,14 @@ class Store:
             return None
         activities, questions = items(reply)
         return DeletedTask(_tokens(activities), [QuestionId(item) for item in texts(items(questions))])
+
+    async def evict_closed_task(self, account_id: AccountId, key_id: KeyId) -> Evicted | None:
+        """Remove the oldest closed task of the key if the key has more closed tasks than the limit."""
+        reply = await self._task_evict(args=[self._p, account_id, key_id, self._limits.max_closed_tasks_per_key])
+        if reply is None:
+            return None
+        task_id, questions = items(reply)
+        return Evicted(TaskId(text(task_id)), [QuestionId(item) for item in texts(items(questions))])
 
     async def page_tasks(
         self, scope: TaskScope, statuses: Sequence[Status], count: int, cursor: Cursor | None
@@ -524,6 +555,23 @@ class Store:
     async def take_widget_mark(self, account_id: AccountId, device_id: DeviceId) -> bool:
         """True if a change came while the throttle of the device was on."""
         return await self._kv.call("GETDEL", self.keys.widget_dirty(account_id, device_id)) is not None
+
+    async def activity_slot(self, task_id: TaskId) -> bool:
+        """True if a Live Activity update can go for the task now. False marks the task for one update later."""
+        keys = [self.keys.activity_throttle(task_id), self.keys.activity_dirty(task_id)]
+        return integer(await self._widget_slot(keys=keys, args=[LIVE_ACTIVITY_UPDATE_INTERVAL_SECONDS])) == 1
+
+    async def renew_activity_slot(self, task_id: TaskId) -> None:
+        await self._kv.call(
+            "SET", self.keys.activity_throttle(task_id), "1", "EX", LIVE_ACTIVITY_UPDATE_INTERVAL_SECONDS
+        )
+
+    async def activity_throttled(self, task_id: TaskId) -> bool:
+        return integer(await self._kv.call("EXISTS", self.keys.activity_throttle(task_id))) == 1
+
+    async def take_activity_mark(self, task_id: TaskId) -> bool:
+        """True if a change came while the throttle of the task was on."""
+        return await self._kv.call("GETDEL", self.keys.activity_dirty(task_id)) is not None
 
     # Questions
 

@@ -17,6 +17,7 @@ from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.questions import QuestionService
 from mcp_client_server.services.seen import SeenMarker
 from mcp_client_server.services.tasks import TaskService
+from mcp_client_server.services.waits import WaitSlots
 from mcp_client_server.store import Store, StoredTask
 from tests.conftest import Launch
 from tests.support import EventListener, FakeBus, FakeClock, RecordingPushSender, Running, SequentialIds
@@ -172,8 +173,9 @@ async def test_a_write_that_always_loses_the_race_ends_as_a_conflict(redis: Redi
     ids, limits = SequentialIds(), Limits()
     hub = EventHub(FakeBus(clock).connect, store.keys, clock)
     seen = SeenMarker(store, clock)
-    inbox = InboxService(store, hub, seen, clock, ids, limits)
-    questions = QuestionService(store, hub, push, inbox, clock, ids, limits)
+    waits = WaitSlots(limits.max_waits_per_key)
+    inbox = InboxService(store, hub, seen, waits, clock, ids, limits)
+    questions = QuestionService(store, hub, push, inbox, waits, clock, ids, limits)
     tasks = TaskService(store, push, questions, inbox, seen, clock, ids, limits)
     real = Store(redis, "t")
     account_id, key_id = AccountId("acc_1"), KeyId("key_1")

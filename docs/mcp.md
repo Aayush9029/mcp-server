@@ -78,6 +78,8 @@ Both tools return as soon as the `status` of the question is not `pending`, or a
 
 A key can have 20 pending questions. One more `ask_user` gives a tool error.
 
+A key can have 32 calls that wait at the same time on one server process: `ask_user`, `get_answer`, `check_inbox`, and the REST requests that wait. One more `get_answer` or `check_inbox` with a `wait_seconds` above 0 gives a tool error. `ask_user` still asks the question and returns it as `pending`.
+
 ### Read the inbox
 
 `check_inbox` gives the agent what the person and other agents sent to its key: tasks that the person assigned, changed, or deleted in the app, answers, and messages. `send_message` puts a message into the inbox of a different agent of the same account. `list_agents` gives the keys of the account. See [Inbox](inbox.md) for the Item, the Agent, and the rules.

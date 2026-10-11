@@ -73,7 +73,7 @@ Each error has this body and a matching HTTP status.
 | 401 | `unauthorized` | The credential is missing or wrong. |
 | 401 | `app_code_invalid`, `attestation_required`, `attestation_invalid` | See [App integrity](app-integrity.md). |
 | 403 | `forbidden` | The credential type cannot use this route. |
-| 404 | `not_found` | The resource does not exist, or it belongs to a different key or account. |
+| 404 | `not_found` | The resource does not exist, or it belongs to a different key or account. A deleted key or account gives this at once, also while the server still removes its data. |
 | 405 | `method_not_allowed` | |
 | 409 | `conflict` | A count limit is full, or the state of the resource does not permit the change. |
 | 413 | `bad_request` | The body is larger than 1 MB. |
@@ -91,6 +91,7 @@ Each error has this body and a matching HTTP status.
 | `POST /v1/attest/challenge` for each IP address | 20 in one hour |
 | `notify_user` calls for each key | 30 in one hour |
 | Messages from one sender | 60 in one hour |
+| Calls that wait at the same time, for each key | 32 on one server process. See [Wait for the answer](rest-api.md#wait-for-the-answer). |
 
 The operator of a server can change the first three values.
 
@@ -101,6 +102,7 @@ The operator of a server can change the first three values.
 | Keys for each account | 20 |
 | Devices for each account | 20 |
 | Open tasks (`todo` or `in_progress`) for each key | 1,000 |
+| Closed tasks (`done` or `cancelled`) for each key | 5,000. When one more closes, the oldest closed task is removed, and the event stream sends `task.deleted`. |
 | Pending questions for each key | 20 |
 | Task `title` | 1 to 200 characters |
 | Task `description` | 0 to 20,000 characters, Markdown |
@@ -123,7 +125,7 @@ The server makes `title`, `label`, `status_note`, `prompt`, and each option one 
 
 | Data | Deleted |
 |------|---------|
-| A task with the status `done` or `cancelled` | 90 days after its last update. The event stream sends `task.deleted`. |
+| A task with the status `done` or `cancelled` | 90 days after its last update, or when the key has more than 5,000 closed tasks. The event stream sends `task.deleted`. |
 | A question that is not `pending` | 90 days after it closed |
 | An inbox item | 7 days if it is unread, 24 hours after it was read |
 | All other data | When the person deletes it |

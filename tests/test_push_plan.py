@@ -10,7 +10,14 @@ from mcp_client_server.ids import DeviceId, KeyId, TaskId
 from mcp_client_server.models import PatchField, Task
 from mcp_client_server.push import PushRequest, TaskChange, Topics
 from mcp_client_server.push import payloads as p
-from mcp_client_server.push.dispatcher import ChangeKind, plan_activity_ends, plan_message, plan_task_pushes
+from mcp_client_server.push.dispatcher import (
+    ChangeKind,
+    plan_activity_ends,
+    plan_activity_update,
+    plan_message,
+    plan_task_pushes,
+    updates_activity,
+)
 from mcp_client_server.push.payloads import TokenRef
 from mcp_client_server.store import EndedActivity, PushContext
 from tests.support import ACTIVITY_TOKEN, APNS_TOKEN, START_TOKEN, Json, make_device, make_task, payload_json
@@ -118,14 +125,24 @@ def test_live_activity_payloads_use_the_exact_activitykit_keys() -> None:
             "timestamp": 1760112301,
             "event": "start",
             "content-state": STATE,
+            "stale-date": 1760112301 + 30 * 60,
+            "relevance-score": 75,
             "attributes-type": "TaskActivityAttributes",
             "attributes": {"taskID": "tsk_01jb2m9x4e7q", "keyLabel": "Claude Code"},
             "alert": {"title": "Claude Code", "body": "Add dark mode support"},
         }
     }
     assert p.activity_update(task, 1760112301.7) == {
-        "aps": {"timestamp": 1760112301, "event": "update", "content-state": STATE}
+        "aps": {
+            "timestamp": 1760112301,
+            "event": "update",
+            "content-state": STATE,
+            "stale-date": 1760112301 + 30 * 60,
+            "relevance-score": 75,
+        }
     }
+    # A task that waits for the person goes first, then one that runs, then the others.
+    assert p.activity_update(make_task(status="todo"), 1.0)["aps"]["relevance-score"] == 50
     assert p.activity_end(make_task(status="done", progress=100), 1760112301.7) == {
         "aps": {
             "timestamp": 1760112301,
@@ -232,7 +249,8 @@ def test_agent_start_sends_push_to_start_only_where_no_activity_runs() -> None:
     live = activity(plan(change("updated", make_task(), "status"), context))
 
     by_event = {(aps(r)["event"], r.ref.device_id): r for r in live}
-    assert set(by_event) == {("update", DEV_2), ("start", DEV_1)}
+    # The `update` of DEV_2 is not planned here: it goes through the throttle of the task.
+    assert set(by_event) == {("start", DEV_1)}
     start = by_event["start", DEV_1]
     assert (start.token, start.topic, start.priority, start.collapse_id) == (
         START_TOKEN,
@@ -241,8 +259,10 @@ def test_agent_start_sends_push_to_start_only_where_no_activity_runs() -> None:
         None,
     )
     assert start.ref == TokenRef("push_to_start_token", DEV_1, TASK_ID)
-    assert by_event["update", DEV_2].ref == TokenRef("activity", DEV_2, TASK_ID)
-    assert by_event["update", DEV_2].token == ACTIVITY_TOKEN
+    updates = plan_activity_update(make_task(), context, TOPICS, 50.0)
+    assert [(r.ref, r.token, aps(r)["event"]) for r in updates] == [
+        (TokenRef("activity", DEV_2, TASK_ID), ACTIVITY_TOKEN, "update")
+    ]
 
 
 def test_only_an_agent_that_moves_a_task_to_in_progress_starts_an_activity() -> None:
@@ -259,18 +279,31 @@ def test_only_an_agent_that_moves_a_task_to_in_progress_starts_an_activity() -> 
     assert events(change("created", make_task(), by_agent=False)) == []
 
 
-def test_activity_update_priority_and_fields() -> None:
+def test_activity_update_fields_and_priority() -> None:
+    """Each field that the Live Activity shows gives an update, and each update has the priority 10.
+
+    A priority of 5 can wait for a long time on a locked device, so the progress on the Lock Screen would not
+    move. The throttle of the task, not the priority, keeps the pushes in the budget.
+    """
     context = ctx([{}], {DEV_1: ACTIVITY_TOKEN, DeviceId("dev_gone"): "ffff"})
 
-    def updates(*changed: PatchField) -> list[tuple[str, int | None, DeviceId]]:
-        requests = activity(plan(change("updated", make_task(), *changed), context))
-        return [(aps(r)["event"], r.priority, r.ref.device_id) for r in requests]
+    def updates(*changed: PatchField) -> bool:
+        item = change("updated", make_task(), *changed)
+        assert activity(plan(item, context)) == []
+        return updates_activity(item)
 
-    assert updates("progress") == [("update", 5, DEV_1)]
-    assert updates("status_note", "progress") == [("update", 5, DEV_1)]
-    assert updates("title") == [("update", 10, DEV_1)]
-    assert updates("description") == []
-    assert updates("priority", "notify") == []
+    assert updates("progress") is True
+    assert updates("status_note", "progress") is True
+    assert updates("title") is True
+    assert updates("description") is False
+    assert updates("priority", "notify") is False
+    assert updates_activity(change("updated", make_task(status="done"), "status")) is False
+    assert updates_activity(change("deleted", make_task(), "title")) is False
+    requests = plan_activity_update(make_task(), context, TOPICS, 50.0)
+    assert [(aps(r)["event"], r.priority, r.ref.device_id, r.push_type) for r in requests] == [
+        ("update", 10, DEV_1, "liveactivity")
+    ]
+    assert plan_activity_update(make_task(), ctx([{}], {DEV_1: ACTIVITY_TOKEN}, live=False), TOPICS, 50.0) == []
 
 
 @pytest.mark.parametrize(

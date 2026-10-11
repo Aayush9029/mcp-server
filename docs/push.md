@@ -161,9 +161,11 @@ The server sends these pushes when the account setting `live_activities` is `tru
 | An agent moves a task to `in_progress`, or creates it with that status | `start` to each device that has a `push_to_start_token` and no registered activity for that task |
 | A task with a registered activity changes `title`, `status`, `progress`, or `status_note` | `update` |
 | A question for a task with a registered activity is created, answered, expired, or cancelled | `update` |
+
+An `update` goes at once when the activity got none in the last 5 seconds. Else the server sends one `update` with the latest state of the task when those 5 seconds end. Thus an agent that sends many progress ticks gives one push in 5 seconds for each task, and the last change is never lost. Each Live Activity push has the APNs priority `10`, because a push with the priority `5` can wait for a long time on a locked device.
 | The task becomes `done` or `cancelled`, or the task or its key is deleted | `end`, with the final content state and a dismissal date 15 minutes later |
 
-Each payload has `aps.timestamp`, `aps.event` (`start`, `update`, or `end`), and `aps.content-state`. A `start` also has `attributes-type`, `attributes`, and an `alert` with the key label as `title` and the task title as `body`, because ActivityKit needs one. An `end` also has `dismissal-date`.
+Each payload has `aps.timestamp`, `aps.event` (`start`, `update`, or `end`), and `aps.content-state`. A `start` and an `update` also have `stale-date` (30 minutes after the push: the system then shows the activity as stale) and `relevance-score` (`100` when the task has a pending question, `75` when the task is `in_progress`, else `50`; the activity with the highest score goes first). A `start` also has `attributes-type`, `attributes`, and an `alert` with the key label as `title` and the task title as `body`, because ActivityKit needs one. An `end` also has `dismissal-date`.
 
 ## Widget reload
 

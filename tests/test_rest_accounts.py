@@ -32,6 +32,30 @@ async def test_health(client: httpx2.AsyncClient) -> None:
     assert (response.status_code, response.json()) == (200, {"status": "ok", "store": "ok"})
 
 
+async def test_head_health_answers_like_get(client: httpx2.AsyncClient) -> None:
+    head = await client.head("/health")
+    assert head.status_code == 200
+    assert head.content == b""
+
+
+async def test_hsts_goes_on_a_response_over_https_and_the_proxy_header_is_trusted_only_on_render(
+    launch: Launch,
+) -> None:
+    hsts = "max-age=31536000; includeSubDomains"
+    forwarded = {"X-Forwarded-Proto": "https"}
+    async with launch(render=True) as running:
+        assert (await running.http.get("/health", headers=forwarded)).headers["strict-transport-security"] == hsts
+        assert "strict-transport-security" not in (await running.http.get("/health")).headers
+        assert (await running.http.get("https://test/health")).headers["strict-transport-security"] == hsts
+    async with launch() as running:
+        assert "strict-transport-security" not in (await running.http.get("/health", headers=forwarded)).headers
+        assert (await running.http.get("https://test/health")).headers["strict-transport-security"] == hsts
+        _, key, _ = await running.api.agent()
+        page = await running.http.get("https://test/v1/tasks", headers=key)
+        assert page.headers["strict-transport-security"] == hsts
+        assert (await running.http.get("https://test/docs")).headers["strict-transport-security"] == hsts
+
+
 async def test_unknown_route_and_method_use_the_error_shape(client: httpx2.AsyncClient) -> None:
     assert error(await client.get("/v1/nothing"), 404, "not_found") == {"code": "not_found", "message": "Not found."}
     error(await client.put("/v1/accounts"), 405, "method_not_allowed")

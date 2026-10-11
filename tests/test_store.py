@@ -217,32 +217,66 @@ async def test_page_of_an_empty_index(store: Store) -> None:
     assert (page.docs, page.last, page.has_more) == ([], None, False)
 
 
-async def test_delete_key_removes_its_tasks_and_its_credential_and_returns_the_activities(
+async def purge(store: Store, key_id: KeyId, batch: int) -> tuple[int, list[tuple[TaskId, dict[DeviceId, str]]]]:
+    """Run the purge steps of a key to the end. Returns the number of steps and the Live Activities that ended."""
+    steps = 0
+    ended: list[tuple[TaskId, dict[DeviceId, str]]] = []
+    while True:
+        steps += 1
+        done, activities = await store.purge_key(key_id, batch)
+        ended += [(item.task.id, item.tokens) for item in activities]
+        if done:
+            return steps, ended
+
+
+async def test_a_detached_key_is_unusable_at_once_and_its_data_goes_in_bounded_steps(
     store: Store, raw: RawStore
 ) -> None:
     seed = Seed(store)
     account_id = await seed.account()
     key_a = await seed.key(account_id, "mck_a")
     key_b = await seed.key(account_id, "mck_b")
-    doomed = [await seed.task(account_id, key_a) for _ in STATUSES]
+    doomed = [await seed.task(account_id, key_a) for _ in range(5)]
     kept = await seed.task(account_id, key_b)
     await store.put_device(account_id, make_device())
     assert await store.put_activity(account_id, doomed[1].id, DEV_1, "aa11") == "ok"
+    cred_a = seed.cred("mck_a")
 
-    assert await store.delete_key(AccountId("acc_other"), key_a, EVENT) is None
-    ended = await store.delete_key(account_id, key_a, EVENT)
-    assert ended is not None
-    assert [(item.task.id, item.tokens) for item in ended] == [(doomed[1].id, {DEV_1: "aa11"})]
+    assert await store.detach_key(AccountId("acc_other"), key_a, 5.0, EVENT) is False
+    assert await store.detach_key(account_id, key_a, 5.0, EVENT) is True
 
+    # The first step alone: the credential, the key, and the account indexes have nothing of the key.
+    assert (await store.authenticate(cred_a, now=6.0, rate_limit=0, rate_bucket="b", rate_ttl=60)).principal is None
+    assert await store.get_key(account_id, key_a) is None
+    assert await store.key_account(key_a) is None
+    assert [key.id for key in await store.list_keys(account_id)] == [key_b]
+    assert await index_state(raw, store, account_id, key_a) == {
+        "key": [task.id for task in doomed],
+        "key:todo": [task.id for task in doomed],
+        "account": [kept.id],
+        "account:todo": [kept.id],
+    }
+    assert await store.get_task(AccountTasks(account_id), doomed[0].id) is None
+    assert await store.create_task(account_id, make_task(id="tsk_late", key_id=key_a), EVENT) == "no_key"
+    assert await store.keys_to_purge(10) == [key_a]
+    # The same call again is not an error: the key is detached, and its data can still go.
+    assert await store.detach_key(account_id, key_a, 7.0, EVENT) is True
+
+    steps, ended = await purge(store, key_a, 2)
+    assert steps == 4  # 2 + 2 + 1 tasks, then the step that finds nothing
+    assert ended == [(doomed[1].id, {DEV_1: "aa11"})]
     assert await index_state(raw, store, account_id, key_a) == {"account": [kept.id], "account:todo": [kept.id]}
     for task in doomed:
         assert await raw.exists(store.keys.task(task.id), store.keys.activities(task.id)) == 0
-    assert await raw.exists(store.keys.key(key_a), store.keys.credential(seed.cred("mck_a"))) == 0
-    assert [key.id for key in await store.list_keys(account_id)] == [key_b]
-    assert await store.delete_key(account_id, key_a, EVENT) is None
+    assert await raw.exists(store.keys.key(key_a), store.keys.credential(cred_a)) == 0
+    assert await store.keys_to_purge(10) == []
+    assert await store.purge_key(key_a, 2) == (True, [])
+    # A key that is in use is never purged.
+    assert await store.purge_key(key_b, 2) == (True, [])
+    assert await store.get_task(KeyTasks(key_b), kept.id) is not None
 
 
-async def test_delete_account_leaves_no_key_of_that_account_in_the_store(store: Store, raw: RawStore) -> None:
+async def test_a_detached_account_leaves_nothing_once_its_keys_are_purged(store: Store, raw: RawStore) -> None:
     seed = Seed(store)
     other = await seed.account("mca_other")
     other_key = await seed.key(other, "mck_other")
@@ -259,10 +293,22 @@ async def test_delete_account_leaves_no_key_of_that_account_in_the_store(store: 
     await store.put_device(account_id, make_device())
     assert await store.put_activity(account_id, TaskId("tsk_008"), DEV_1, "aa11") == "ok"
 
-    assert await store.delete_account(account_id, EVENT) is True
+    assert await store.detach_account(account_id, 5.0, EVENT) == [key_id]
+    assert (
+        await store.authenticate(seed.cred("mca_test"), now=6.0, rate_limit=0, rate_bucket="b", rate_ttl=60)
+    ).principal is None
+    assert (
+        await store.authenticate(seed.cred("mck_test"), now=6.0, rate_limit=0, rate_bucket="b", rate_ttl=60)
+    ).principal is None
+    assert await store.get_account(account_id) is None
+    assert await store.list_devices(account_id) == []
+    assert await store.detach_account(account_id, 7.0, EVENT) is None
+    assert await store.keys_to_purge(10) == [key_id]
+    await purge(store, key_id, 500)
     assert await raw.keys() == before
-    assert await store.delete_account(account_id, EVENT) is False
-    assert await store.delete_account(other, EVENT) is True
+
+    assert await store.detach_account(other, 8.0, EVENT) == [other_key]
+    await purge(store, other_key, 500)
     assert await raw.keys() == []
 
 

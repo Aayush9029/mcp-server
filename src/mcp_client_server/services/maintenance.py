@@ -5,6 +5,7 @@ import random
 from mcp_client_server.clock import Clock
 from mcp_client_server.events import frames
 from mcp_client_server.limits import Limits
+from mcp_client_server.services.purge import KeyPurger
 from mcp_client_server.services.questions import QuestionService
 from mcp_client_server.store import Store
 
@@ -18,11 +19,15 @@ _QUESTION_BATCH = 100
 
 
 class Maintenance:
-    """Deletes closed tasks and closed questions after their retention time, and expires pending questions."""
+    """Deletes closed tasks and closed questions after their retention time, expires pending questions, and
+    finishes the deletion of keys that stopped halfway."""
 
-    def __init__(self, store: Store, questions: QuestionService, clock: Clock, limits: Limits) -> None:
+    def __init__(
+        self, store: Store, questions: QuestionService, purger: KeyPurger, clock: Clock, limits: Limits
+    ) -> None:
         self._store = store
         self._questions = questions
+        self._purger = purger
         self._clock = clock
         self._limits = limits
 
@@ -52,6 +57,7 @@ class Maintenance:
                     pass
                 while await self._questions.purge_closed(_QUESTION_BATCH) == _QUESTION_BATCH:
                     pass
+                await self._purger.finish_pending()
             except asyncio.CancelledError:
                 raise
             except Exception:

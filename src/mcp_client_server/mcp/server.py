@@ -65,6 +65,7 @@ from mcp_client_server.services.tasks import TaskService
 logger = logging.getLogger(__name__)
 
 _LIST_TTL_MS = 5 * 60 * 1000
+_MINUTE = 60
 
 
 def instructions(app_name: str) -> str:
@@ -120,8 +121,8 @@ def _explain(exc: AppError) -> str:
             return f"{exc.message} This API key sees only its own tasks. Call list_tasks to get the valid task IDs."
         return exc.message
     if isinstance(exc, RateLimited):
-        minutes = -(-exc.retry_after // 60)
-        return f"{exc.message} Try again in {minutes} min. Do not call again before then."
+        wait = f"{exc.retry_after} s" if exc.retry_after < _MINUTE else f"{-(-exc.retry_after // _MINUTE)} min"
+        return f"{exc.message} Try again in {wait}. Do not call again before then."
     if isinstance(exc, ValidationFailed):
         return "Invalid arguments. " + " ".join(f"{name}: {message}" for name, message in exc.fields.items())
     return exc.message
@@ -302,6 +303,9 @@ class Tools:
         except StoreUnavailable:
             # The question is asked. A wait that cannot start must not look like a question that failed.
             logger.warning("ask_user: the wait for an answer could not start")
+        except RateLimited:
+            # The key has the most calls that can wait at once. The result is the pending question.
+            pass
         return _result(views.question_summary(question), question)
 
     @corrective

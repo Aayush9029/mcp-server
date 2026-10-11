@@ -98,7 +98,12 @@ def task_updated(task: Task) -> str:
 
 
 def task_deleted(task: Task) -> str:
-    return _frame("task.deleted", _TaskDeleted(task_id=task.id, key_id=task.key_id))
+    return task_removed(task.id, task.key_id)
+
+
+def task_removed(task_id: TaskId, key_id: KeyId) -> str:
+    """`task.deleted` for a task whose document is gone already."""
+    return _frame("task.deleted", _TaskDeleted(task_id=task_id, key_id=key_id))
 
 
 def key_created(key: Key) -> str:

@@ -342,6 +342,32 @@ async def test_messages_from_one_sender_have_an_hourly_limit(launch: Launch) -> 
         await api.message(sender, to="Other", text="After the hour")
 
 
+async def test_a_message_to_a_key_that_is_not_found_does_not_count_against_the_limit(launch: Launch) -> None:
+    async with launch(limits=Limits(messages_per_hour=1)) as running:
+        api = running.api
+        account, key, key_info = await api.agent()
+        other_key, _ = await api.key(account, "Other")
+        error(
+            await api.http.post("/v1/messages", json={"key_id": "key_x", "text": "Hi"}, headers=account),
+            404,
+            "not_found",
+        )
+        error(
+            await api.http.post("/v1/messages", json={"to": "Nobody", "text": "Hi"}, headers=other_key),
+            404,
+            "not_found",
+        )
+
+        await api.message(account, key_id=key_info["id"], text="Counted")
+        await api.message(other_key, to=key_info["id"], text="Counted")
+        error(
+            await api.http.post("/v1/messages", json={"key_id": key_info["id"], "text": "One more"}, headers=account),
+            429,
+            "rate_limited",
+        )
+        assert len((await api.inbox(key))["items"]) == 2
+
+
 async def test_seen_at_is_the_time_the_agent_first_gets_the_task(
     running: Running, redis_listener: EventListener
 ) -> None:
@@ -427,7 +453,7 @@ async def test_many_calls_wait_at_once_and_hold_no_store_connection(launch: Laun
     # connection could not all wait.
     pool = {"own_connections": True, "redis_max_connections": 2} if store_url else {}
     count = 100 if store_url else 40
-    async with launch(**pool) as running:
+    async with launch(limits=Limits(max_waits_per_key=count), **pool) as running:
         api = running.api
         account, key, key_info = await api.agent()
 

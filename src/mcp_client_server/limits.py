@@ -35,6 +35,11 @@ MCP_LIST_LIMIT_DEFAULT = 50
 
 LAST_USED_WRITE_INTERVAL_SECONDS = 60
 LIVE_ACTIVITY_DISMISS_SECONDS = 15 * 60
+# A Live Activity gets one `update` in this time at most, with the latest state. The hourly budget of the
+# system is not published; this keeps a chatty agent under 720 updates in one hour for one task.
+LIVE_ACTIVITY_UPDATE_INTERVAL_SECONDS = 5
+# The system shows the Live Activity as stale when no update came for this long.
+LIVE_ACTIVITY_STALE_SECONDS = 30 * 60
 WIDGET_PUSH_INTERVAL_SECONDS = 15
 ATTEST_CHALLENGE_TTL_SECONDS = 5 * 60
 
@@ -44,6 +49,8 @@ class Limits:
     max_keys_per_account: int = 20
     max_devices_per_account: int = 20
     max_open_tasks_per_key: int = 1000
+    # The oldest closed task of a key is removed when one more closes.
+    max_closed_tasks_per_key: int = 5000
     notify_user_per_hour: int = 30
     closed_task_ttl_seconds: int = 90 * 24 * 3600
     max_pending_questions_per_key: int = 20
@@ -54,3 +61,8 @@ class Limits:
     closed_question_ttl_seconds: int = 90 * 24 * 3600
     # A filter on priority reads tasks that it does not return. One request reads this many at most.
     filter_scan_budget: int = 2000
+    # Both are for one server process. A stream above the first ends the oldest stream of the account.
+    max_streams_per_account: int = 16
+    max_waits_per_key: int = 32
+    # A deleted key loses its data in steps of this many items, so no step holds the store for long.
+    purge_batch: int = 500

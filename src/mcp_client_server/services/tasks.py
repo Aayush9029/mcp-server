@@ -11,7 +11,7 @@ from mcp_client_server.clock import Clock
 from mcp_client_server.credentials import AccountPrincipal, AgentPrincipal, Principal
 from mcp_client_server.errors import Conflict, LimitReached, NotFound, RateLimited, ValidationFailed
 from mcp_client_server.events import frames
-from mcp_client_server.ids import IdSource, KeyId, TaskId
+from mcp_client_server.ids import AccountId, IdSource, KeyId, TaskId
 from mcp_client_server.limits import Limits
 from mcp_client_server.models import (
     OPEN_STATUSES,
@@ -31,7 +31,7 @@ from mcp_client_server.services.inbox import InboxService
 from mcp_client_server.services.questions import QuestionService
 from mcp_client_server.services.scope import own_scope
 from mcp_client_server.services.seen import SeenMarker
-from mcp_client_server.store import AccountTasks, Cursor, KeyTasks, Store, StoredTask, TaskScope
+from mcp_client_server.store import AccountTasks, Cursor, Evicted, KeyTasks, Store, StoredTask, TaskScope
 
 _WRITE_ATTEMPTS = 8
 _HOUR = 3600
@@ -178,6 +178,8 @@ class TaskService:
                 self._push.task_changed(principal.account_id, TaskChange("created", task, _NO_CHANGE, by_agent))
                 if not by_agent:
                     await self._inbox.task_assigned(principal.account_id, task)
+                if not task.is_open:
+                    await self._keep_closed_limit(principal.account_id, key_id)
                 return task
             case "limit":
                 raise LimitReached(self._open_limit_message)
@@ -259,6 +261,8 @@ class TaskService:
                     self._push.task_changed(principal.account_id, TaskChange("updated", task, changed, by_agent))
                     if not by_agent:
                         await self._inbox.task_changed(principal.account_id, stored.task, task, changed)
+                    if "status" in changed and not task.is_open:
+                        await self._keep_closed_limit(principal.account_id, task.key_id)
                     return task
                 case "limit":
                     raise LimitReached(self._open_limit_message)
@@ -283,6 +287,14 @@ class TaskService:
                     await self._inbox.task_deleted(principal.account_id, task)
                 return task
         raise Conflict("The task changed at the same time. Try again.")
+
+    async def _keep_closed_limit(self, account_id: AccountId, key_id: KeyId) -> None:
+        """A key keeps a limited number of closed tasks. The oldest one goes, as a task that expired does."""
+        evicted: Evicted | None = await self._store.evict_closed_task(account_id, key_id)
+        if evicted is None:
+            return
+        await self._store.publish(account_id, frames.task_removed(evicted.task_id, key_id))
+        await self._questions.cancel_for_deleted_task(account_id, evicted.pending_questions)
 
     async def seen(self, principal: AgentPrincipal, tasks: Sequence[Task]) -> list[Task]:
         """Note that the agent got these tasks. A surface calls this for the tasks that it gives to an agent."""
