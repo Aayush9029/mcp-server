@@ -23,7 +23,7 @@ services:
       - key: SUPPORT_EMAIL
         sync: false
       - key: APP_STORE_URL
-        sync: false
+        value: https://apps.apple.com/app/id6821470281
       - key: APNS_KEY_P8
         sync: false
       - key: APNS_KEY_ID

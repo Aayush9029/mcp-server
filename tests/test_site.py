@@ -547,6 +547,11 @@ async def test_product_strings_come_from_the_settings_and_are_escaped(serve: Ser
 
 async def test_the_app_store_action_follows_the_setting(serve: Serve) -> None:
     async with serve() as http:
+        released = await page(http, "/")
+    assert released.count('href="https://apps.apple.com/app/id6821470281">Get the app</a>') == 3
+    assert "Coming soon" not in released
+
+    async with serve(app_store_url=None) as http:
         soon = await page(http, "/")
     assert soon.count("Coming soon to the App&nbsp;Store") == 3
     assert "Get the app" not in soon
@@ -741,7 +746,12 @@ async def test_the_terms_point_to_the_apple_agreement_and_support_shows_the_addr
 async def test_the_legal_pages_are_in_the_footer_and_not_in_the_navigation(site: httpx2.AsyncClient, path: str) -> None:
     html = await page(site, path)
     navigation = re.findall(r'href="([^"]+)"', part(html, "header"))
-    assert [link for link in navigation if not link.startswith("/static/")] == ["/", "/docs", "/#connect"]
+    assert [link for link in navigation if not link.startswith("/static/")] == [
+        "/",
+        "/docs",
+        "/#connect",
+        "https://apps.apple.com/app/id6821470281",
+    ]
     footer = re.findall(r'<a href="([^"]+)">([^<]+)</a>', part(html, "footer"))
     assert footer == [
         ("/docs", "Docs"),

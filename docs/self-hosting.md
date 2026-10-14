@@ -45,7 +45,7 @@ All configuration is environment variables. `.env.example` lists them. An empty 
 | `APP_NAME` | `MCP Client` | The name in the pages, the MCP server info, and the server instructions |
 | `SUPPORT_EMAIL` | `support@example.com` | The contact address in the pages |
 | `PUBLIC_BASE_URL` | `http://localhost:8000` | The public URL of the server. Its origin can call `/mcp` from a browser. |
-| `APP_STORE_URL` | none | The link to the app in the pages |
+| `APP_STORE_URL` | `https://apps.apple.com/app/id6821470281` | The link to the app in the pages |
 
 ### Store
 

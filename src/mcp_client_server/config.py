@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     app_name: str = "MCP Client"
     support_email: str = "support@example.com"
     public_base_url: str = "http://localhost:8000"
-    app_store_url: str | None = None
+    app_store_url: str | None = "https://apps.apple.com/app/id6821470281"
 
     redis_url: str = Field(default="redis://localhost:6379/0", repr=False)
     redis_key_prefix: str = "mc"

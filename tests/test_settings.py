@@ -47,7 +47,7 @@ def test_settings_come_from_the_environment_and_bad_values_stop_the_startup(monk
     assert (settings.log_level, settings.mcp_url, settings.app_store_url) == (
         "WARNING",
         "https://relay.example/mcp",
-        None,
+        "https://apps.apple.com/app/id6821470281",
     )
     assert settings.allowed_origins == {"https://relay.example", "https://a.example", "https://b.example"}
     assert "secret" not in repr(settings)

@@ -1,5 +1,5 @@
 > [!NOTE]
-> The new iOS app, **Relaydeck**, is on its way to the App Store. The download link goes here when it is live.
+> **Relaydeck** is now available on the [App Store](https://apps.apple.com/app/id6821470281) for iPhone, iPad, and Apple Watch.
 
 # MCP Client for iOS
 
@@ -44,7 +44,7 @@ Perfect for developers who want their AI assistants to collaborate on real proje
 
 ### 1. Get Your API Key
 
-Open the iOS app and create a key for each agent.
+[Download Relaydeck](https://apps.apple.com/app/id6821470281), open the app, and create a key for each agent.
 
 ### 2. Connect Your Agents
 
