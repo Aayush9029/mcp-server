@@ -72,5 +72,6 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
+      - run: brew install gum
       - run: uv sync --frozen
       - run: uv run pytest tests/test_install.py

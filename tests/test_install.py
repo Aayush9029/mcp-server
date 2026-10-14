@@ -23,7 +23,6 @@ type Json = dict[str, Any]
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "install.sh"
 HOOK_SCRIPT = ROOT / "plugins" / "relaydeck" / "hooks" / "inbox.sh"
-MENU_PROMPT = "Press Enter to continue: "
 
 GOOD_KEY = "mck_" + "A1b2C3d4" * 5
 SECOND_KEY = "mck_" + "Z9y8X7w6" * 5
@@ -51,6 +50,7 @@ SYSTEM_TOOLS = (
     "rm",
     "rmdir",
     "sed",
+    "sh",
     "stty",
     "tail",
     "tr",
@@ -270,6 +270,33 @@ sys.stdout.write("200" if any('Bearer %s"' % key in STDIN for key in accepted) e
 """
 )
 
+GUM_STUB = """#!@PYTHON@
+import json, os, subprocess, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+state = Path(os.environ["STUB_STATE"])
+with (state / "gum-calls.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\\n")
+if args[0] == "style":
+    print("Relaydeck")
+    sys.exit(0)
+if args[0] == "spin":
+    sys.exit(subprocess.run(args[args.index("--") + 1:]).returncode)
+if "--header" in args:
+    print(args[args.index("--header") + 1], file=sys.stderr)
+index_file = state / "gum-index"
+index = int(index_file.read_text()) if index_file.exists() else 0
+replies = json.loads(os.environ.get("STUB_GUM_REPLIES", "[]"))
+index_file.write_text(str(index + 1))
+if index >= len(replies):
+    sys.exit("Unexpected TUI prompt")
+reply = replies[index]
+if isinstance(reply, int):
+    sys.exit(reply)
+print(reply)
+"""
+
 # A local stand-in for the REST API: GET /v1/tasks?limit=1 answers 200 for a known key, else 401.
 KEY_SERVER = """
 import http.server, json, sys
@@ -300,15 +327,16 @@ server.serve_forever()
 # Runs a command with a pseudo-terminal as its terminal, and types each reply after its prompt shows.
 # It is a separate program because the test process can have threads, and a fork is not safe there.
 TERMINAL_DRIVER = """
-import json, os, pty, select, signal, sys, time
+import fcntl, json, os, pty, select, signal, struct, sys, termios, time
 
 spec = json.loads(sys.argv[1])
 pid, master = pty.fork()
 if pid == 0:
+    fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
     os.chdir(spec["cwd"])
     os.execve(spec["argv"][0], spec["argv"], spec["env"])
 seen, window, steps = "", "", spec["steps"]
-deadline = time.monotonic() + 240
+deadline = time.monotonic() + 60
 while time.monotonic() < deadline:
     if steps and steps[0][0] in window:
         prompt, reply = steps.pop(0)
@@ -452,7 +480,7 @@ class Sandbox:
             "STUB_STATE": str(self.state),
             "STUB_GOOD_KEYS": f"{GOOD_KEY},{SECOND_KEY}",
             "LANG": "C",
-            "TERM": "xterm",
+            "TERM": "xterm-256color",
         }
 
     def stub(self, name: str, source: str) -> None:
@@ -476,6 +504,26 @@ class Sandbox:
             check=False,
         )
         return Result(done.returncode, done.stdout, done.stderr)
+
+    def run_each(self, *args: str, key: str | None = None, env: dict[str, str] | None = None) -> Result:
+        if "--agents" not in args or "--uninstall" in args or "--dry-run" in args:
+            return self.run(*args, key=key, env=env)
+        index = args.index("--agents") + 1
+        results = [
+            self.run(*args[:index], agent, *args[index + 1 :], key=key, env=env) for agent in args[index].split(",")
+        ]
+        return Result(
+            max(result.code for result in results),
+            "".join(result.out for result in results),
+            "".join(result.err for result in results),
+        )
+
+    def run_tui(self, *args: str, replies: list[str | int]) -> Result:
+        self.stub("gum", GUM_STUB)
+        return self.run_in_terminal(*args, steps=[], env={"STUB_GUM_REPLIES": json.dumps(replies)})
+
+    def gum_calls(self) -> list[list[str]]:
+        return [json.loads(line) for line in (self.state / "gum-calls.jsonl").read_text().splitlines()]
 
     def run_in_terminal(self, *args: str, steps: list[tuple[str, str]], env: dict[str, str] | None = None) -> Result:
         """Runs `cat install.sh | sh` with a terminal, and types each reply after its prompt shows.
@@ -586,7 +634,7 @@ def test_help_lists_each_flag(box: Sandbox) -> None:
     for flag in ("--agents", "--key", "--url", "--name", "--host", "--uninstall", "--dry-run", "--yes", "--help"):
         assert flag in result.out
     assert "RELAYDECK_API_KEY" in result.out
-    listed = result.out.split("with commas between them:")[1].split("--key")[0]
+    listed = result.out.split("One agent to connect:")[1].split("--key")[0]
     script = SCRIPT.read_text()
     agent_ids = script.split('AGENT_IDS="')[1].split('"')[0].split()
     assert [word.strip(",") for word in listed.split()] == agent_ids
@@ -667,76 +715,167 @@ def test_colors_show_only_on_a_terminal(box: Sandbox) -> None:
 # ------------------------------------------------------------------ detection and selection
 
 
-def test_the_menu_lists_only_the_agents_that_are_found(box: Sandbox, key_server: KeyServer) -> None:
-    box.stub("claude", CLAUDE_STUB)
-    box.stub("zed", "#!/bin/sh\n")
+def test_the_menu_marks_detection_and_connects_one_agent(box: Sandbox, key_server: KeyServer) -> None:
     (box.home / ".cursor").mkdir()
-    (box.home / ".t3").mkdir()
-    result = box.run_in_terminal("--url", key_server.url, "--dry-run", steps=[(MENU_PROMPT, "\n")])
-    assert result.code == 0
-    menu = result.terminal
-    assert "[x]  1) Claude Code" in menu
-    assert "[x]  2) Cursor" in menu
-    assert "[x]  3) Zed" in menu
-    assert " 4) " not in menu
-    missing = "Codex, Gemini CLI, opencode, GitHub Copilot CLI, Antigravity, Kiro, Factory Droid, Cline, Amp"
-    assert f"Not found: {missing}. Use --agents to connect one of them." in menu
-    assert "T3 Code uses the agents in this list" in menu
-    assert "connected" not in menu
-    for label in ("Claude Code", "Cursor", "Zed"):
-        assert label in result.out
-    for label in ("Codex", "Gemini CLI", "opencode", "Kiro"):
-        assert label not in result.out
-
-
-def test_the_menu_marks_an_agent_that_is_connected(box: Sandbox, key_server: KeyServer) -> None:
-    box.stub("claude", CLAUDE_STUB)
-    box.stub("codex", CODEX_STUB)
-    (box.home / ".gemini").mkdir()
-    assert box.run("--url", key_server.url, "--agents", "codex,cursor", key=GOOD_KEY).code == 0
-
-    result = box.run_in_terminal("--url", key_server.url, "--dry-run", steps=[(MENU_PROMPT, "\n")])
-    rows = {line.split(") ")[1].split("  ")[0]: line for line in result.terminal.splitlines() if ") " in line}
-    assert list(rows) == ["Claude Code", "Codex", "Cursor", "Gemini CLI"]
-    assert [name for name, row in rows.items() if "+ connected" in row] == ["Codex", "Cursor"]
-    assert all(row.strip().startswith("[x]") for row in rows.values())
-    assert "T3 Code" not in result.terminal
-
-    removal = box.run_in_terminal("--url", key_server.url, "--uninstall", "--dry-run", steps=[(MENU_PROMPT, "\n")])
-    rows = {line.split(") ")[1].split("  ")[0]: line for line in removal.terminal.splitlines() if ") " in line}
-    assert [name for name, row in rows.items() if row.strip().startswith("[x]")] == ["Codex", "Cursor"]
-    assert removal.out.count("would remove") == 2
-
-
-def test_the_menu_switches_agents_on_and_off(box: Sandbox, key_server: KeyServer) -> None:
-    for folder in (".cursor", ".gemini", ".kiro"):
-        (box.home / folder).mkdir()
-    steps = [(MENU_PROMPT, "1, 3 9 x\n"), (MENU_PROMPT, "n\n"), (MENU_PROMPT, "2\n"), (MENU_PROMPT, "\n")]
-    result = box.run_in_terminal("--url", key_server.url, "--dry-run", steps=steps)
-    assert result.code == 0
-    assert '"9" is not a number in the list' in result.terminal
-    assert '"x" is not a number in the list' in result.terminal
-    assert "[ ]  1) Cursor" in result.terminal
-    assert "[ ]  3) Kiro" in result.terminal
-    assert "Gemini CLI" in result.out
-    assert "Cursor" not in result.out
-    assert "Kiro" not in result.out
-
-
-def test_no_selection_changes_nothing(box: Sandbox, key_server: KeyServer) -> None:
-    (box.home / ".cursor").mkdir()
-    result = box.run_in_terminal("--url", key_server.url, steps=[(MENU_PROMPT, "n\n"), (MENU_PROMPT, "\n")])
-    assert result.code == 0
-    assert "No agent is selected. Nothing was changed." in result.out
+    result = box.run_tui("--url", key_server.url, "--dry-run", replies=["cursor", "apply", "done"])
+    assert result.code == 0, result.text
+    menu = box.gum_calls()[1]
+    assert "Cursor|cursor" in menu
+    assert "Codex · not detected|codex" not in menu
+    assert "Other agent…|other" in menu
+    assert "--limit" in menu
+    assert menu[menu.index("--limit") + 1] == "1"
+    assert "Cursor · preview" in result.terminal
     assert box.files() == set()
 
 
-def test_a_machine_without_agents_gets_the_manual_steps(box: Sandbox, key_server: KeyServer) -> None:
-    result = box.run_in_terminal("--url", key_server.url, steps=[])
+def test_the_menu_marks_an_agent_that_is_connected(box: Sandbox, key_server: KeyServer) -> None:
+    assert box.run("--url", key_server.url, "--agents", "cursor", key=GOOD_KEY).code == 0
+    result = box.run_tui("--url", key_server.url, "--dry-run", replies=["done"])
+    assert result.code == 0
+    assert "Cursor · connected|cursor" in box.gum_calls()[1]
+
+
+def test_the_tui_goes_back_before_applying(box: Sandbox, key_server: KeyServer) -> None:
+    result = box.run_tui("--url", key_server.url, "--dry-run", replies=["cursor", "back", "gemini", "apply", "done"])
+    assert result.code == 0, result.text
+    assert "Gemini CLI · preview" in result.terminal
+    assert "Cursor · preview" not in result.terminal
+    assert box.files() == set()
+
+
+def test_no_selection_changes_nothing(box: Sandbox, key_server: KeyServer) -> None:
+    result = box.run_tui("--url", key_server.url, replies=["done"])
+    assert result.code == 0
+    assert box.files() == set()
+    assert not any(call[0] == "input" for call in box.gum_calls())
+
+
+def test_setup_rejects_a_shared_key_for_multiple_agents(box: Sandbox, key_server: KeyServer) -> None:
+    before = len(key_server.requests)
+    result = box.run("--url", key_server.url, "--agents", "cursor,gemini", key=GOOD_KEY)
+    assert result.code == 2
+    assert "Each agent needs its own API key" in result.err
+    assert len(key_server.requests) == before
+    assert box.files() == set()
+
+
+def test_yes_requires_an_explicit_agent(box: Sandbox) -> None:
+    result = box.run("--yes", key=GOOD_KEY)
+    assert result.code == 2
+    assert "Use --yes with --agents" in result.err
+    assert box.files() == set()
+
+
+def test_the_tui_loops_with_a_fresh_key_per_agent(box: Sandbox, key_server: KeyServer) -> None:
+    result = box.run_tui(
+        "--url",
+        key_server.url,
+        replies=["cursor", GOOD_KEY, "apply", "again", "other", "gemini", GOOD_KEY, SECOND_KEY, "apply", "done"],
+    )
+    assert result.code == 0, result.text
+    assert "Create a new key" in result.terminal
+    assert read_json(box.home / ".cursor/mcp.json")["mcpServers"]["tasks"]["headers"] == headers(GOOD_KEY)
+    assert read_json(box.home / ".gemini/settings.json")["mcpServers"]["tasks"]["headers"] == headers(SECOND_KEY)
+    assert GOOD_KEY not in result.text
+    assert SECOND_KEY not in result.text
+    assert all("--password" in call for call in box.gum_calls() if call[0] == "input")
+    assert list((box.root / "tmp").iterdir()) == []
+
+
+def test_the_tui_review_goes_back_to_key_entry(box: Sandbox, key_server: KeyServer) -> None:
+    result = box.run_tui(
+        "--url",
+        key_server.url,
+        replies=["cursor", GOOD_KEY, "back", SECOND_KEY, "apply", "done"],
+    )
+    assert result.code == 0, result.text
+    assert read_json(box.home / ".cursor/mcp.json")["mcpServers"]["tasks"]["headers"] == headers(SECOND_KEY)
+
+
+def test_the_tui_can_escape_key_entry(box: Sandbox, key_server: KeyServer) -> None:
+    result = box.run_tui("--url", key_server.url, replies=["cursor", 1, "done"])
+    assert result.code == 0
+    assert box.files() == set()
+
+
+def test_the_tui_cancels_without_writing(box: Sandbox, key_server: KeyServer) -> None:
+    result = box.run_tui("--url", key_server.url, replies=["cursor", GOOD_KEY, 130])
+    assert result.code == 130
+    assert box.files() == set()
+    assert list((box.root / "tmp").iterdir()) == []
+
+
+def test_the_tui_recovers_from_a_connection_error(box: Sandbox) -> None:
+    result = box.run_tui("--url", "http://127.0.0.1:9/mcp", replies=["cursor", GOOD_KEY, "back", "done"])
+    assert result.code == 0, result.text
+    assert "Could not reach the server" in result.terminal
+    assert box.files() == set()
+
+
+def test_the_tui_reports_configuration_failure(box: Sandbox, key_server: KeyServer) -> None:
+    result = box.run_tui("--url", key_server.url, replies=["claude", GOOD_KEY, "apply", "done"])
     assert result.code == 1
-    assert "No supported agent was found. Use --agents to choose one." in result.out
-    assert "https://github.com/Aayush9029/mcp-server#quick-start" in result.out
-    assert "Press Enter" not in result.terminal
+    assert "Claude Code needs attention" in result.terminal
+    assert "the claude command is not on your PATH" in result.terminal
+
+
+def test_the_tui_keeps_hook_warnings_visible(box: Sandbox, key_server: KeyServer) -> None:
+    path = box.home / ".cursor/hooks.json"
+    path.parent.mkdir()
+    path.write_text("broken")
+    result = box.run_tui("--url", key_server.url, replies=["cursor", GOOD_KEY, "apply", "done"])
+    assert result.code == 0, result.text
+    assert "Cursor connected" in result.terminal
+    assert "The inbox hooks were not changed" in result.terminal
+    assert path.read_text() == "broken"
+
+
+def test_an_unverified_gum_download_is_not_executed(box: Sandbox) -> None:
+    box.stub("uname", '#!/bin/sh\ncase "$1" in -m) echo arm64;; *) echo Darwin;; esac\n')
+    box.stub(
+        "curl",
+        "#!@PYTHON@\nimport sys\nfrom pathlib import Path\n"
+        'Path(sys.argv[sys.argv.index("-o") + 1]).write_text("bad archive")\n',
+    )
+    box.stub("shasum", '#!/bin/sh\nprintf "0000  %s\\n" "$3"\n')
+    result = box.run_in_terminal(steps=[])
+    assert result.code == 1
+    assert "checksum did not match" in result.out
+    assert box.files() == set()
+    assert list((box.root / "tmp").iterdir()) == []
+
+
+def test_real_gum_arrow_keys_and_masked_input(box: Sandbox, key_server: KeyServer) -> None:
+    gum = shutil.which("gum")
+    if gum is None:
+        pytest.skip("Gum is not installed")
+    (box.bin / "gum").symlink_to(gum)
+    result = box.run_in_terminal(
+        "--url",
+        key_server.url,
+        steps=[
+            ("Choose one agent", "\x1b[B\x1b[B\r"),
+            ("Paste its key", GOOD_KEY + "\r"),
+            ("3 / 3", "\x1b[B\r"),
+            ("Paste its key", "\x1b"),
+            ("Choose one agent", "\x1b[B\x1b[B\x1b[B\r"),
+            ("Paste its key", SECOND_KEY + "\r"),
+            ("3 / 3", "\r"),
+            ("What next?", "\x1b[B\r"),
+        ],
+    )
+    assert result.code == 0, result.text
+    assert not (box.home / ".cursor/mcp.json").exists()
+    assert read_json(box.home / ".gemini/settings.json")["mcpServers"]["tasks"]["headers"] == headers(SECOND_KEY)
+    assert GOOD_KEY not in result.text
+    assert SECOND_KEY not in result.text
+
+
+def test_a_machine_without_detected_agents_can_choose_one(box: Sandbox, key_server: KeyServer) -> None:
+    result = box.run_tui("--url", key_server.url, "--dry-run", replies=["cursor", "apply", "done"])
+    assert result.code == 0, result.text
+    assert "Cursor · not detected|cursor" in box.gum_calls()[1]
     assert box.files() == set()
 
 
@@ -825,10 +964,10 @@ def test_each_agent_gets_the_host_name(box: Sandbox, key_server: KeyServer) -> N
     box.stub("claude", CLAUDE_STUB)
     box.stub("codex", CODEX_STUB)
     args = ["--url", key_server.url, "--agents", "claude,codex,cursor"]
-    planned = box.run(*args, "--dry-run")
+    planned = box.run_each(*args, "--dry-run")
     assert f'The app shows this machine as "{HOST}". Use --host to give a different name.' in planned.out
 
-    result = box.run(*args, key=GOOD_KEY)
+    result = box.run_each(*args, key=GOOD_KEY)
     assert result.code == 0, result.text
     assert f'The app shows this machine as "{HOST}".' in result.out
     cursor = box.home / ".cursor/mcp.json"
@@ -836,19 +975,19 @@ def test_each_agent_gets_the_host_name(box: Sandbox, key_server: KeyServer) -> N
     config = box.codex_home / "config.toml"
     assert tomllib.loads(config.read_text())["mcp_servers"]["tasks"]["http_headers"] == headers()
     assert box.claude_state()["servers"]["tasks"]["headers"][1] == f"X-Relaydeck-Host: {HOST}"
-    assert box.run(*args, key=GOOD_KEY).out.count("No change.") == 3
+    assert box.run_each(*args, key=GOOD_KEY).out.count("No change.") == 3
 
     # A different name updates each entry. The name loses each character that is not safe in a header.
-    renamed = box.run(*args, "--host", 'Work "Mac" №1', key=GOOD_KEY)
+    renamed = box.run_each(*args, "--host", 'Work "Mac" №1', key=GOOD_KEY)
     assert renamed.code == 0, renamed.text
     assert 'The app shows this machine as "Work-Mac-1".' in renamed.out
     assert renamed.out.count("updated") == 2
     assert read_json(cursor)["mcpServers"]["tasks"]["headers"] == headers(host="Work-Mac-1")
     assert tomllib.loads(config.read_text())["mcp_servers"]["tasks"]["http_headers"] == headers(host="Work-Mac-1")
     assert box.claude_state()["servers"]["tasks"]["headers"][1] == "X-Relaydeck-Host: Work-Mac-1"
-    assert box.run(*args, "--host=Work-Mac-1", key=GOOD_KEY).out.count("No change.") == 3
+    assert box.run_each(*args, "--host=Work-Mac-1", key=GOOD_KEY).out.count("No change.") == 3
 
-    removed = box.run(*args, "--uninstall")
+    removed = box.run_each(*args, "--uninstall")
     assert removed.code == 0, removed.text
     assert "Removed Relaydeck from 3 agents." in removed.out
     assert "The app shows this machine" not in removed.out
@@ -895,7 +1034,7 @@ def test_the_claude_code_plugin_gets_the_host_name(box: Sandbox) -> None:
 
 def test_each_json_agent_gets_its_own_format(box: Sandbox, key_server: KeyServer) -> None:
     agents = "cursor,gemini,opencode,zed,copilot,antigravity,kiro,droid,cline,amp"
-    result = box.run("--url", key_server.url, "--agents", agents, key=GOOD_KEY)
+    result = box.run_each("--url", key_server.url, "--agents", agents, key=GOOD_KEY)
     assert result.code == 0, result.text
     url = key_server.url
     remote: Json = {"url": url, "headers": headers()}
@@ -923,11 +1062,11 @@ def test_each_json_agent_gets_its_own_format(box: Sandbox, key_server: KeyServer
         assert path.stat().st_mode & 0o777 == 0o600
     hook_files = [".cursor/hooks.json", ".cursor/hooks/relaydeck-inbox.sh", ".gemini/hooks/relaydeck-inbox.sh"]
     assert box.files() == {f"home/{name}" for name in [*expected, *hook_files]}
-    assert "Done. 10 agents can now use the server" in result.out
+    assert result.out.count("1 agent can now use the server") == 10
 
-    again = box.run("--url", key_server.url, "--agents", agents, key=GOOD_KEY)
+    again = box.run_each("--url", key_server.url, "--agents", agents, key=GOOD_KEY)
     assert again.out.count("No change.") == 10
-    removed = box.run("--url", key_server.url, "--agents", agents, "--uninstall")
+    removed = box.run_each("--url", key_server.url, "--agents", agents, "--uninstall")
     assert removed.code == 0, removed.text
     assert "Removed Relaydeck from 10 agents." in removed.out
     assert not any(GOOD_KEY.encode() in content for content in box.snapshot().values())
@@ -936,7 +1075,7 @@ def test_each_json_agent_gets_its_own_format(box: Sandbox, key_server: KeyServer
 
 def test_an_agent_file_can_be_in_a_different_place(box: Sandbox, key_server: KeyServer) -> None:
     env = {"COPILOT_HOME": str(box.home / "copilot"), "CLINE_MCP_SETTINGS_PATH": str(box.home / "cline/mcp.json")}
-    result = box.run("--url", key_server.url, "--agents", "copilot,cline", key=GOOD_KEY, env=env)
+    result = box.run_each("--url", key_server.url, "--agents", "copilot,cline", key=GOOD_KEY, env=env)
     assert result.code == 0, result.text
     assert box.files() == {"home/copilot/mcp-config.json", "home/cline/mcp.json"}
 
@@ -1068,7 +1207,7 @@ def test_a_malformed_file_is_not_changed(box: Sandbox, key_server: KeyServer, co
     path.parent.mkdir()
     path.write_text(content)
     for args in (["--agents", "cursor,gemini"], ["--agents", "cursor,gemini", "--uninstall"]):
-        result = box.run("--url", key_server.url, *args, key=GOOD_KEY)
+        result = box.run_each("--url", key_server.url, *args, key=GOOD_KEY)
         assert result.code == 1
         assert reason in result.out
         assert "Not changed." in result.out
@@ -1124,14 +1263,15 @@ def test_opencode_uses_the_jsonc_file_when_it_is_the_only_one(box: Sandbox, key_
 
 def test_cursor_and_gemini_get_the_inbox_hooks(box: Sandbox, key_server: KeyServer) -> None:
     args = ["--url", key_server.url, "--agents", "cursor,gemini"]
-    planned = box.run(*args, "--dry-run")
+    planned = box.run_each(*args, "--dry-run")
     assert 'would add "tasks" to ~/.cursor/mcp.json, with the inbox hooks in ~/.cursor/hooks.json' in planned.out
     assert box.files() == set()
 
-    result = box.run(*args, key=GOOD_KEY)
+    result = box.run_each(*args, key=GOOD_KEY)
     assert result.code == 0, result.text
     assert 'added "tasks" to ~/.cursor/mcp.json. Added the inbox hooks to ~/.cursor/hooks.json.' in result.out
-    assert "Inbox hooks are on for: Cursor, Gemini CLI." in result.out
+    assert "Inbox hooks are on for: Cursor." in result.out
+    assert "Inbox hooks are on for: Gemini CLI." in result.out
     assert "What to try next" in result.out
     assert "Create a task for the agent in the Relaydeck app." in result.out
     assert "trust the Relaydeck hooks" not in result.out
@@ -1145,20 +1285,20 @@ def test_cursor_and_gemini_get_the_inbox_hooks(box: Sandbox, key_server: KeyServ
     assert backups(box.home / ".gemini/settings.json") == []
 
     snapshot = box.snapshot()
-    again = box.run(*args, key=GOOD_KEY)
+    again = box.run_each(*args, key=GOOD_KEY)
     assert again.out.count("No change.") == 2
     assert box.snapshot() == snapshot
 
-    planned = box.run(*args, "--uninstall", "--dry-run")
+    planned = box.run_each(*args, "--uninstall", "--dry-run")
     assert planned.out.count("and the inbox hooks from") == 2
     assert box.snapshot() == snapshot
-    removed = box.run(*args, "--uninstall")
+    removed = box.run_each(*args, "--uninstall")
     assert removed.code == 0, removed.text
     assert 'removed "tasks" from ~/.cursor/mcp.json and the inbox hooks from ~/.cursor/hooks.json' in removed.out
     assert read_json(box.home / ".cursor/hooks.json") == {"version": 1}
     assert read_json(box.home / ".gemini/settings.json") == {"mcpServers": {}}
     assert not any(script.exists() or script.parent.exists() for script in scripts)
-    assert box.run(*args, "--uninstall").out.count("Nothing to remove.") == 2
+    assert box.run_each(*args, "--uninstall").out.count("Nothing to remove.") == 2
 
 
 CURSOR_HOOKS_FILE = """{
@@ -1194,7 +1334,7 @@ def test_the_hooks_of_the_person_stay(box: Sandbox, key_server: KeyServer) -> No
     (box.home / ".cursor/hooks").mkdir()
     (box.home / ".cursor/hooks/format.sh").write_text("#!/bin/sh\n")
     args = ["--url", key_server.url, "--agents", "cursor,gemini"]
-    result = box.run(*args, key=GOOD_KEY)
+    result = box.run_each(*args, key=GOOD_KEY)
     assert result.code == 0, result.text
 
     audit: Json = {"command": "./hooks/audit.sh", "loop_limit": 10}
@@ -1210,13 +1350,13 @@ def test_the_hooks_of_the_person_stay(box: Sandbox, key_server: KeyServer) -> No
     assert [backup.read_text() for backup in backups(gemini)] == [GEMINI_HOOKS_FILE]
 
     # A different server name gives new hook commands. The agent keeps one set of Relaydeck hooks.
-    renamed = box.run(*args, "--name", "relay", key=GOOD_KEY)
+    renamed = box.run_each(*args, "--name", "relay", key=GOOD_KEY)
     assert renamed.code == 0, renamed.text
     assert _loose_json(cursor)["hooks"]["stop"] == [cursor_hooks("relay")["stop"][0], audit]
     assert read_json(gemini)["hooks"]["AfterAgent"] == gemini_hooks("relay")["AfterAgent"]
 
-    assert box.run(*args, "--name", "relay", "--uninstall").code == 0
-    assert box.run(*args, "--uninstall").code == 0
+    assert box.run_each(*args, "--name", "relay", "--uninstall").code == 0
+    assert box.run_each(*args, "--uninstall").code == 0
     assert cursor.read_text() == CURSOR_HOOKS_FILE
     assert read_json(gemini) == json.loads(GEMINI_HOOKS_FILE) | {"mcpServers": {}}
     assert (box.home / ".cursor/hooks/format.sh").exists()
@@ -1244,14 +1384,14 @@ def test_a_second_run_changes_nothing(box: Sandbox, key_server: KeyServer) -> No
     box.stub("codex", CODEX_STUB)
     (box.codex_home / "config.toml").write_text('model = "gpt"\n')
     args = ["--url", key_server.url, "--agents", "claude,codex,cursor,gemini,opencode,zed"]
-    first = box.run(*args, key=GOOD_KEY)
+    first = box.run_each(*args, key=GOOD_KEY)
     assert first.code == 0, first.text
-    assert "Done. 6 agents can now use the server" in first.out
+    assert first.out.count("1 agent can now use the server") == 6
     snapshot = box.snapshot()
     claude_state = box.claude_state()
     claude_calls, codex_calls = box.commands("claude"), box.commands("codex")
 
-    second = box.run(*args, key=GOOD_KEY)
+    second = box.run_each(*args, key=GOOD_KEY)
     assert second.code == 0, second.text
     assert second.out.count("No change.") == 6
     assert "Each agent was already set up." in second.out
@@ -1264,8 +1404,8 @@ def test_a_second_run_changes_nothing(box: Sandbox, key_server: KeyServer) -> No
 def test_a_new_key_replaces_the_old_key(box: Sandbox, key_server: KeyServer) -> None:
     box.stub("codex", CODEX_STUB)
     args = ["--url", key_server.url, "--agents", "codex,cursor"]
-    assert box.run(*args, key=GOOD_KEY).code == 0
-    result = box.run(*args, key=SECOND_KEY)
+    assert box.run_each(*args, key=GOOD_KEY).code == 0
+    result = box.run_each(*args, key=SECOND_KEY)
     assert result.code == 0, result.text
     assert result.out.count("updated") == 2
 
@@ -1295,9 +1435,9 @@ def test_a_backup_never_keeps_a_key(box: Sandbox, key_server: KeyServer) -> None
     earlier.write_text(f'{{"mcpServers": {{"tasks": {{"headers": {{"Authorization": "Bearer {OLD_KEY}"}}}}}}}}\n')
     args = ["--url", key_server.url, "--agents", "codex,cursor"]
 
-    assert box.run(*args, "--name", "relay", key=GOOD_KEY).code == 0
+    assert box.run_each(*args, "--name", "relay", key=GOOD_KEY).code == 0
     # The second server makes a backup of a file that has the key of the first server.
-    assert box.run(*args, key=SECOND_KEY).code == 0
+    assert box.run_each(*args, key=SECOND_KEY).code == 0
     saved = [backup.read_text() for backup in backups(cursor)]
     assert len(saved) == 3
     assert saved[0] == '{"mcpServers": {"tasks": {"headers": {"Authorization": "Bearer relaydeck-key-removed"}}}}\n'
@@ -1311,11 +1451,11 @@ def test_a_backup_never_keeps_a_key(box: Sandbox, key_server: KeyServer) -> None
 
     # A run that changes no file leaves the backups without keys too.
     earlier.write_text(f"Bearer {OLD_KEY}\n")
-    assert "No change." in box.run(*args, key=SECOND_KEY).out
+    assert "No change." in box.run_each(*args, key=SECOND_KEY).out
     assert earlier.read_text() == "Bearer relaydeck-key-removed\n"
 
-    assert box.run(*args, "--name", "relay", "--uninstall").code == 0
-    assert box.run(*args, "--uninstall").code == 0
+    assert box.run_each(*args, "--name", "relay", "--uninstall").code == 0
+    assert box.run_each(*args, "--uninstall").code == 0
     assert cursor.read_text() == CURSOR_FILE
     assert config.read_text() == toml
     assert files_with(box, "mck_") == []
@@ -1380,9 +1520,9 @@ def test_uninstall_removes_only_the_relaydeck_entry(box: Sandbox, key_server: Ke
     toml = 'model = "gpt"\n\n[mcp_servers.docs]\nurl = "https://docs.example/mcp"\n'
     config.write_text(toml)
     agents = ["--url", key_server.url, "--agents", "claude,codex,cursor,gemini"]
-    assert box.run(*agents, key=GOOD_KEY).code == 0
+    assert box.run_each(*agents, key=GOOD_KEY).code == 0
 
-    result = box.run(*agents, "--uninstall")
+    result = box.run_each(*agents, "--uninstall")
     assert result.code == 0, result.text
     assert "Removed Relaydeck from 4 agents." in result.out
     assert cursor.read_text() == CURSOR_FILE
@@ -1395,7 +1535,7 @@ def test_uninstall_removes_only_the_relaydeck_entry(box: Sandbox, key_server: Ke
     assert files_with(box, "mck_") == []
     assert GOOD_KEY not in result.text
 
-    again = box.run(*agents, "--uninstall")
+    again = box.run_each(*agents, "--uninstall")
     assert again.code == 0
     assert again.out.count("Nothing to remove.") == 4
     assert "Removed Relaydeck from 0 agents." in again.out
@@ -1411,7 +1551,7 @@ def test_a_dry_run_changes_nothing(box: Sandbox, key_server: KeyServer) -> None:
     before_files, before_requests = box.files(), len(key_server.requests)
     agents = ["--url", key_server.url, "--agents", "claude,codex,cursor,zed"]
 
-    result = box.run(*agents, "--dry-run")
+    result = box.run_each(*agents, "--dry-run")
     assert result.code == 0, result.text
     assert result.out.count("would ") == 4
     assert 'would add "tasks" to ~/.cursor/mcp.json' in result.out
@@ -1423,9 +1563,9 @@ def test_a_dry_run_changes_nothing(box: Sandbox, key_server: KeyServer) -> None:
     assert box.commands("codex") == ["mcp get tasks --json", "mcp list --json"]
     assert "would write [mcp_servers.tasks]" in result.out
 
-    assert box.run(*agents, key=GOOD_KEY).code == 0
+    assert box.run_each(*agents, key=GOOD_KEY).code == 0
     installed = box.snapshot()
-    removal = box.run(*agents, "--uninstall", "--dry-run")
+    removal = box.run_each(*agents, "--uninstall", "--dry-run")
     assert removal.code == 0
     assert removal.out.count("would remove") == 4
     assert box.snapshot() == installed
@@ -1567,11 +1707,11 @@ def test_claude_code_uses_mcp_add_for_a_different_server(box: Sandbox, key_serve
 
 
 def test_an_agent_without_its_command_fails_with_a_reason(box: Sandbox, key_server: KeyServer) -> None:
-    result = box.run("--url", key_server.url, "--agents", "claude,codex,cursor", key=GOOD_KEY)
+    result = box.run_each("--url", key_server.url, "--agents", "claude,codex,cursor", key=GOOD_KEY)
     assert result.code == 1
     assert "the claude command is not on your PATH. Not changed." in result.out
     assert "the codex command is not on your PATH. Not changed." in result.out
-    assert "Not complete for 2 agents." in result.out
+    assert result.out.count("Not complete for 1 agent.") == 2
     assert (box.home / ".cursor/mcp.json").exists()
 
 
@@ -1759,7 +1899,7 @@ def test_jq_does_the_merge_when_python_is_absent(box: Sandbox, key_server: KeySe
     path.parent.mkdir()
     path.write_text(CURSOR_FILE)
     args = ["--url", key_server.url, "--agents", "cursor,gemini"]
-    result = box.run(*args, key=GOOD_KEY)
+    result = box.run_each(*args, key=GOOD_KEY)
     assert result.code == 0, result.text
     merged, original = read_json(path), json.loads(CURSOR_FILE)
     assert merged == original | {"mcpServers": original["mcpServers"] | {"tasks": entry(key_server.url)}}
@@ -1769,12 +1909,12 @@ def test_jq_does_the_merge_when_python_is_absent(box: Sandbox, key_server: KeySe
     assert gemini == {"mcpServers": {"tasks": entry(key_server.url, url_field="httpUrl")}, "hooks": gemini_hooks()}
     assert read_json(box.home / ".cursor/hooks.json") == {"version": 1, "hooks": cursor_hooks()}
 
-    assert box.run(*args, key=GOOD_KEY).out.count("No change.") == 2
-    assert box.run(*args, key=SECOND_KEY).out.count("updated") == 2
-    assert box.run(*args, "--name", "relay", key=GOOD_KEY).code == 0
+    assert box.run_each(*args, key=GOOD_KEY).out.count("No change.") == 2
+    assert box.run_each(*args, key=SECOND_KEY).out.count("updated") == 2
+    assert box.run_each(*args, "--name", "relay", key=GOOD_KEY).code == 0
     assert read_json(box.home / ".cursor/hooks.json")["hooks"] == cursor_hooks("relay")
-    assert box.run(*args, "--name", "relay", "--uninstall").code == 0
-    assert box.run(*args, "--uninstall").code == 0
+    assert box.run_each(*args, "--name", "relay", "--uninstall").code == 0
+    assert box.run_each(*args, "--uninstall").code == 0
     assert read_json(path) == json.loads(CURSOR_FILE)
     assert read_json(box.home / ".cursor/hooks.json") == {"version": 1}
     assert read_json(box.home / ".gemini/settings.json") == {"mcpServers": {}}
@@ -1797,7 +1937,7 @@ def test_without_python_and_jq_only_a_new_file_is_possible(box: Sandbox, key_ser
     gemini = box.home / ".gemini/settings.json"
     gemini.parent.mkdir()
     gemini.write_text('{"theme": "dark"}\n')
-    result = box.run("--url", key_server.url, "--agents", "cursor,gemini", key=GOOD_KEY)
+    result = box.run_each("--url", key_server.url, "--agents", "cursor,gemini", key=GOOD_KEY)
     assert result.code == 1
     assert read_json(box.home / ".cursor/mcp.json") == {"mcpServers": {"tasks": entry(key_server.url)}}
     assert "python3 or jq is necessary to change ~/.gemini/settings.json safely. Not changed." in result.out

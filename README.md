@@ -52,7 +52,7 @@ Perfect for developers who want their AI assistants to collaborate on real proje
 curl -fsSL https://relaydeck.onrender.com/install | sh
 ```
 
-The installer finds the coding agents on your machine, asks which ones to set up, and asks for your API key one time. Or set up one agent by hand:
+Choose one agent with the arrow keys, paste its key from the app, then connect. Escape goes back. After setup, choose another agent and use a new key. The menu uses [Gum](https://github.com/charmbracelet/gum), downloaded temporarily if needed. For unattended setup, pass `--agents cursor --yes` and set `RELAYDECK_API_KEY` to Cursor's key. Or set up one agent by hand:
 
 #### For Claude Code
 

@@ -22,6 +22,7 @@ PLUGIN_REPO="Aayush9029/mcp-server"
 CLAUDE_MIN_VERSION="2.1.285"
 
 AGENT_IDS="claude codex cursor gemini opencode zed copilot antigravity kiro droid cline amp"
+GUM_VERSION=2.0.2
 
 # The sed program that takes each Relaydeck API key out of a text.
 KEY_PATTERN='s/mck_[A-Za-z0-9_-]*/relaydeck-key-removed/g'
@@ -62,17 +63,15 @@ usage() {
     cat <<EOF
 Relaydeck installer
 
-Connects the coding agents on this machine to a Relaydeck MCP server. The agents
-can then make tasks, send notifications, and ask you questions on your iPhone,
-iPad, and Apple Watch. They also get the tasks, answers, and messages that you
-send from the app.
+Connect one coding agent at a time, with its own key from the Relaydeck app.
+Use arrow keys to choose, Enter to continue, and Esc to go back.
 
 Usage:
   curl -fsSL $INSTALL_URL | sh
   curl -fsSL $INSTALL_URL | sh -s -- [options]
 
 Options:
-  --agents LIST   Agents to set up, with commas between them:
+  --agents AGENT  One agent to connect:
                   claude, codex, cursor, gemini, opencode, zed, copilot,
                   antigravity, kiro, droid, cline, amp
   --key KEY       API key. Other users can see a command line, so the prompt
@@ -84,7 +83,7 @@ Options:
   --uninstall     Remove the server and the inbox hooks from the agents. This
                   removes only an entry that has the same name and the same URL.
   --dry-run       Show the changes, and change nothing
-  --yes           Skip the agent menu and use each agent that was found
+  --yes           Skip questions; requires --agents for setup
   --help          Show this text
 
 Environment:
@@ -92,6 +91,8 @@ Environment:
   NO_COLOR            Turns off colors
 
 Without a terminal, give --agents and a key. Manual steps: $MANUAL_URL
+Lists are supported for --uninstall and --dry-run only.
+The interactive menu uses Gum, downloaded temporarily if needed.
 EOF
 }
 
@@ -153,6 +154,18 @@ parse_args() {
     AGENTS=''
     if [ -n "$AGENTS_ARG" ]; then
         read_agent_list "$AGENTS_ARG"
+    fi
+    require_one_agent
+}
+
+require_one_agent() {
+    if [ "$ACTION" = install ] && [ "$DRY_RUN" = 0 ]; then
+        case $AGENTS in
+            *' '*) usage_error "Connect one agent at a time. Each agent needs its own API key." ;;
+        esac
+        if [ "$YES" = 1 ] && [ -z "$AGENTS_ARG" ]; then
+            usage_error "Use --yes with --agents and one agent's API key."
+        fi
     fi
 }
 
@@ -323,75 +336,229 @@ read_agent_list() {
     [ -n "$AGENTS" ] || usage_error "--agents needs one agent or more."
 }
 
-# toggle_agent WORD: WORD is the number in the menu that the person typed.
-toggle_agent() {
-    ta_id='' ta_count=0
-    for ta_item in $DETECTED; do
-        ta_count=$((ta_count + 1))
-        if [ "$ta_count" = "$1" ]; then ta_id=$ta_item; fi
-    done
-    if [ -z "$ta_id" ]; then
-        tty_say "${YELLOW}\"$1\" is not a number in the list.${RESET}"
-        return 0
-    fi
-    ta_next=''
-    for ta_item in $DETECTED; do
-        if listed "$ta_item" "$AGENTS"; then ta_on=1; else ta_on=0; fi
-        if [ "$ta_item" = "$ta_id" ]; then ta_on=$((1 - ta_on)); fi
-        if [ "$ta_on" = 1 ]; then ta_next="${ta_next:+$ta_next }$ta_item"; fi
-    done
-    AGENTS=$ta_next
-}
-
-show_menu() {
-    tty_say ""
-    if [ "$ACTION" = install ]; then
-        tty_say "${BOLD}Agents on this machine${RESET}  ${DIM}[x] = connect${RESET}"
-    else
-        tty_say "${BOLD}Agents on this machine${RESET}  ${DIM}[x] = disconnect${RESET}"
-    fi
-    sm_number=0
-    for sm_id in $DETECTED; do
-        sm_number=$((sm_number + 1))
-        if listed "$sm_id" "$AGENTS"; then sm_box="[x]"; else sm_box="[ ]"; fi
-        if listed "$sm_id" "$CONNECTED"; then sm_note="${GREEN}${MARK_DONE} connected${RESET}"; else sm_note=''; fi
-        printf '  %s %2d) %-19s %s\n' "$sm_box" "$sm_number" "$(agent_label "$sm_id")" "$sm_note" >/dev/tty
-    done
-    if [ -n "$MISSING" ]; then
-        tty_say "${DIM}Not found: $MISSING. Use --agents to connect one of them.${RESET}"
-    fi
-    if [ -d "$HOME/.t3" ]; then
-        tty_say "${DIM}T3 Code uses the agents in this list, so it needs no setup of its own.${RESET}"
-    fi
-}
-
-menu() {
-    while :; do
-        show_menu
-        tty_ask 'Type numbers to switch agents on or off, "a" for all, "n" for none. Press Enter to continue: '
-        [ -n "$REPLY" ] || break
-        for mn_word in $(printf '%s' "$REPLY" | tr ',' ' '); do
-            case $mn_word in
-                a | A | all) AGENTS=$DETECTED ;;
-                n | N | none) AGENTS='' ;;
-                *) toggle_agent "$mn_word" ;;
-            esac
-        done
-    done
-}
-
 choose_agents() {
     [ -z "$AGENTS" ] || return 0
     detect_agents
     [ -n "$DETECTED" ] || die "No supported agent was found. Use --agents to choose one. Manual steps: $MANUAL_URL"
     AGENTS=$DETECTED
-    [ "$YES" = 0 ] || return 0
-    say "Looking at the agents on this machine ..."
-    find_connected
-    if [ "$ACTION" = uninstall ]; then
-        AGENTS=$CONNECTED
+}
+
+setup_tui() {
+    if has_cmd gum; then
+        GUM=$(command -v gum)
+    else
+        gum_platform=$(uname -s)_$(uname -m)
+        case $gum_platform in
+            Darwin_arm64) gum_hash=4777a69b1170b8db23c95d5889fb32186cfda1a3ac950d339aa17e3513633890 ;;
+            Darwin_x86_64) gum_hash=5374966c7c7199ea879fcaa525ddc6d447a098d3d35496e430a9a1ef38d30485 ;;
+            Linux_aarch64 | Linux_arm64)
+                gum_platform=Linux_arm64
+                gum_hash=8ebf8b54ec1e8c81f2bb58b59ff9b70998186a4d11375f0cf357b80e0ccfa1d5
+                ;;
+            Linux_x86_64) gum_hash=d842e06d93dbed90af48cb8dd10698db6f22e331fc40346bb37bbc753109edc2 ;;
+            *) die "Install Gum to use the menu, or use --agents with one agent. https://github.com/charmbracelet/gum" ;;
+        esac
+        gum_archive="gum_${GUM_VERSION}_${gum_platform}"
+        tty_say "Preparing the setup menu ..."
+        curl -fsSL --connect-timeout 15 --max-time 120 \
+            "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/${gum_archive}.tar.gz" \
+            -o "$WORK/gum.tar.gz" || die "Could not download Gum. Use --agents with one agent to continue."
+        if has_cmd shasum; then
+            gum_actual=$(shasum -a 256 "$WORK/gum.tar.gz")
+        elif has_cmd sha256sum; then
+            gum_actual=$(sha256sum "$WORK/gum.tar.gz")
+        else
+            die "Install Gum, or use --agents with one agent; a SHA-256 tool is needed for the menu download."
+        fi
+        [ "${gum_actual%% *}" = "$gum_hash" ] || die "Gum download checksum did not match. Nothing was changed."
+        tar -xzf "$WORK/gum.tar.gz" -C "$WORK" "$gum_archive/gum" || die "Could not unpack Gum."
+        GUM=$WORK/$gum_archive/gum
     fi
-    menu
+    TUI=1
+    GUM_CHOOSE_CURSOR_FOREGROUND=141 GUM_CHOOSE_HEADER_FOREGROUND=141 GUM_CHOOSE_SELECTED_FOREGROUND=141
+    GUM_INPUT_CURSOR_FOREGROUND=141 GUM_INPUT_PROMPT_FOREGROUND=141 GUM_INPUT_HEADER_FOREGROUND=141
+    export GUM_CHOOSE_CURSOR_FOREGROUND GUM_CHOOSE_HEADER_FOREGROUND GUM_CHOOSE_SELECTED_FOREGROUND
+    export GUM_INPUT_CURSOR_FOREGROUND GUM_INPUT_PROMPT_FOREGROUND GUM_INPUT_HEADER_FOREGROUND
+}
+
+tui_choose() {
+    REPLY=''
+    tc_header=$1
+    shift
+    if REPLY=$("$GUM" choose --limit 1 --height 14 --label-delimiter '|' --header "$tc_header" \
+        --cursor '› ' --show-help "$@" </dev/tty 2>/dev/tty); then
+        return 0
+    else
+        tui_status=$?
+        [ "$tui_status" != 130 ] || exit 130
+        return 1
+    fi
+}
+
+tui_menu() {
+    detect_agents
+    find_connected
+    tm_options=${DETECTED:-$AGENT_IDS}
+    set --
+    for tm_id in $tm_options; do
+        tm_label=$(agent_label "$tm_id")
+        if listed "$tm_id" "$CONNECTED"; then
+            tm_label="$tm_label · connected"
+        elif ! listed "$tm_id" "$DETECTED"; then
+            tm_label="$tm_label · not detected"
+        fi
+        set -- "$@" "$tm_label|$tm_id"
+    done
+    if [ -n "$DETECTED" ] && [ -n "$MISSING" ]; then
+        set -- "$@" 'Other agent…|other'
+    fi
+    tui_choose '1 / 3 · Choose one agent' "$@" 'Done|done' || return 1
+    [ "$REPLY" != 'done' ] || return 1
+    if [ "$REPLY" = other ]; then
+        set --
+        for tm_id in $AGENT_IDS; do
+            listed "$tm_id" "$DETECTED" || set -- "$@" "$(agent_label "$tm_id")|$tm_id"
+        done
+        if ! tui_choose 'Choose another agent' "$@" 'Back|back'; then
+            tui_menu
+            return
+        fi
+        if [ "$REPLY" = back ]; then
+            tui_menu
+            return
+        fi
+    fi
+    AGENTS=$REPLY
+}
+
+tui_key() {
+    tk_label=$(agent_label "$AGENTS")
+    while :; do
+        if [ -z "$KEY" ]; then
+            if KEY=$("$GUM" input --password --char-limit 160 --width 48 --placeholder 'mck_…' \
+                --header "2 / 3 · $tk_label · Paste its key from the app${NL}Enter to continue · Esc to go back" \
+                </dev/tty 2>/dev/tty); then
+                KEY=$(printf '%s' "$KEY" | tr -d '[:space:]')
+            else
+                tk_status=$?
+                KEY=''
+                [ "$tk_status" != 130 ] || exit 130
+                return 1
+            fi
+        fi
+        if ! valid_key "$KEY"; then
+            tty_say "${YELLOW}Paste an API key starting with mck_.${RESET}"
+        elif listed "$KEY" "$TUI_KEYS"; then
+            tty_say "${YELLOW}That key was used for another agent. Create a new key in the app.${RESET}"
+        else
+            verify_key
+            case $VERIFIED in
+                ok) return 0 ;;
+                bad) tty_say "${YELLOW}Key not accepted. Try another.${RESET}" ;;
+                *)
+                    tty_say "${YELLOW}Could not reach the server (HTTP $vk_code).${RESET}"
+                    if ! tui_choose 'Try again?' 'Retry|retry' 'Back|back'; then
+                        KEY=''
+                        return 1
+                    fi
+                    if [ "$REPLY" != retry ]; then
+                        KEY=''
+                        return 1
+                    fi
+                    continue
+                    ;;
+            esac
+        fi
+        KEY=''
+    done
+}
+
+tui_setup_agent() {
+    if [ "$DRY_RUN" = 1 ]; then
+        ts_action=Preview
+    elif [ "$ACTION" = uninstall ]; then
+        ts_action=Disconnect
+    else
+        ts_action=Connect
+    fi
+    while :; do
+        if [ "$ACTION" = install ] && [ "$DRY_RUN" = 0 ]; then
+            tui_key || return 1
+        fi
+        if ! tui_choose "3 / 3 · $(agent_label "$AGENTS") · $MACHINE${NL}$URL" \
+            "$ts_action|apply" 'Back|back' 'Done|done'; then
+            REPLY=back
+        fi
+        case $REPLY in
+            back)
+                KEY=''
+                if [ "$ACTION" != install ] || [ "$DRY_RUN" = 1 ]; then
+                    return 1
+                fi
+                ;;
+            done) return 2 ;;
+            apply)
+                run_agents
+                tui_result
+                return 0
+                ;;
+        esac
+    done
+}
+
+tui_result() {
+    tr_label=$(agent_label "$AGENTS")
+    if [ "$FAILED" -gt 0 ]; then
+        tty_say "${RED}${MARK_FAIL} $tr_label needs attention${RESET}"
+        tty_say "$R_TEXT"
+        print_log >/dev/tty
+    elif [ "$DRY_RUN" = 1 ]; then
+        tty_say "${DIM}${MARK_PLAN} $tr_label · preview${RESET}"
+        tty_say "$R_TEXT"
+    elif [ "$ACTION" = uninstall ]; then
+        if [ "$R_STATE" = same ]; then
+            tty_say "$R_TEXT"
+        else
+            tty_say "${GREEN}${MARK_DONE} $tr_label disconnected${RESET}"
+        fi
+    else
+        tty_say "${GREEN}${MARK_DONE} $tr_label connected · $MACHINE${RESET}"
+        tty_say 'Start a new agent session to try it.'
+        if [ "$CODEX_TRUST" = 1 ]; then
+            tty_say "${YELLOW}In Codex, open /hooks and trust Relaydeck.${RESET}"
+        fi
+    fi
+    if [ -n "$R_WARNING" ]; then
+        tty_say "${YELLOW}$R_WARNING${RESET}"
+    fi
+}
+
+run_tui() {
+    setup_tui
+    "$GUM" style --border rounded --border-foreground 141 --padding '0 2' --bold \
+        '✦ Relaydeck' 'Connect your coding agent' >/dev/tty
+    TUI_KEYS='' TUI_FAILED=0
+    while tui_menu; do
+        if ! tui_setup_agent; then
+            KEY=''
+            [ "$REPLY" != 'done' ] || break
+            continue
+        fi
+        if [ "$FAILED" -gt 0 ]; then
+            TUI_FAILED=1
+        elif [ "$ACTION" = install ] && [ "$DRY_RUN" = 0 ]; then
+            TUI_KEYS="${TUI_KEYS:+$TUI_KEYS }$KEY"
+        fi
+        KEY=''
+        if [ "$ACTION" = uninstall ]; then
+            tui_next='Disconnect another agent'
+        else
+            tui_next='Set up another agent'
+        fi
+        tui_choose 'What next?' "$tui_next|again" 'Done|done' || break
+        [ "$REPLY" = again ] || break
+    done
+    [ "$TUI_FAILED" = 0 ]
 }
 
 # ---------------------------------------------------------------- API key
@@ -399,14 +566,24 @@ choose_agents() {
 # Sets VERIFIED to ok, bad, or error. The key goes to curl through stdin, not through an argument.
 verify_key() {
     has_cmd curl || die "curl is necessary to check the API key."
-    say "Checking the API key with $(api_base) ..."
-    vk_code=$(printf 'header = "Authorization: Bearer %s"\n' "$KEY" |
-        curl -sS -K - -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 90 \
-            "$(api_base)/v1/tasks?limit=1" 2>"$LOG") || vk_code=000
+    if [ "$TUI" = 1 ]; then
+        # shellcheck disable=SC2016  # arguments belong to the child shell
+        vk_code=$(printf 'header = "Authorization: Bearer %s"\n' "$KEY" |
+            "$GUM" spin --spinner dot --spinner.foreground 141 --title 'Checking key' -- \
+                sh -c 'curl -sS -K - -o /dev/null -w "%{http_code}" --connect-timeout 15 --max-time 90 "$2" 2>"$1"' \
+                sh "$LOG" "$(api_base)/v1/tasks?limit=1" 2>/dev/tty) || vk_code=000
+    else
+        say "Checking the API key with $(api_base) ..."
+        vk_code=$(printf 'header = "Authorization: Bearer %s"\n' "$KEY" |
+            curl -sS -K - -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 90 \
+                "$(api_base)/v1/tasks?limit=1" 2>"$LOG") || vk_code=000
+    fi
     case $vk_code in
         200)
             VERIFIED=ok
-            say "  ${GREEN}${MARK_DONE}${RESET} The server accepted the API key."
+            if [ "$TUI" = 0 ]; then
+                say "  ${GREEN}${MARK_DONE}${RESET} The server accepted the API key."
+            fi
             ;;
         401 | 403) VERIFIED=bad ;;
         *) VERIFIED=error ;;
@@ -462,6 +639,7 @@ report() {
         plan) rp_mark="${DIM}${MARK_PLAN}${RESET}" ;;
         *) rp_mark="${RED}${MARK_FAIL}${RESET}" && FAILED=$((FAILED + 1)) ;;
     esac
+    [ "$TUI" = 0 ] || return 0
     printf '  %s %-19s %s\n' "$rp_mark" "$(agent_label "$AGENT")" "$R_TEXT"
     if [ "$R_STATE" = fail ]; then
         print_log
@@ -479,8 +657,14 @@ need_cli() {
 # Asks before it replaces a server that has the same name and a different URL.
 confirm_replace() {
     if [ "$HAVE_TTY" = 1 ] && [ "$YES" = 0 ]; then
-        tty_ask "$(agent_label "$AGENT"): a different server named \"$NAME\" is in $1. Replace it? [y/N] "
-        case $REPLY in y | Y | yes | Yes | YES) return 0 ;; esac
+        if [ "$TUI" = 1 ]; then
+            if tui_choose "Replace \"$NAME\" in $1?" 'Keep existing|keep' 'Replace|replace'; then
+                [ "$REPLY" != replace ] || return 0
+            fi
+        else
+            tty_ask "$(agent_label "$AGENT"): a different server named \"$NAME\" is in $1. Replace it? [y/N] "
+            case $REPLY in y | Y | yes | Yes | YES) return 0 ;; esac
+        fi
     fi
     finish fail "a different server named \"$NAME\" is in $1. Not changed. Use --name to give a different name."
     return 1
@@ -1076,25 +1260,30 @@ add_note() {
     R_TEXT="$R_TEXT $1"
 }
 
+add_warning() {
+    R_WARNING="${R_WARNING:+$R_WARNING$NL}$1"
+    add_note "$1"
+}
+
 # Sets HOOK_STATE for the hooks in a file: absent, same, or stale. Fails with a note when the
 # installer cannot use the file.
 hooks_state() {
     HOOK_STATE=absent
     uses_file "$1"
     if [ "$JSON_TOOL" = none ]; then
-        add_note "The inbox hooks need python3 or jq, so they were not changed."
+        add_warning "The inbox hooks need python3 or jq, so they were not changed."
         return 1
     fi
     [ -e "$1" ] || return 0
     if [ ! -f "$1" ] || [ ! -r "$1" ]; then
-        add_note "The inbox hooks were not changed: cannot read $(tilde "$1")."
+        add_warning "The inbox hooks were not changed: cannot read $(tilde "$1")."
         return 1
     fi
     grep -q '[^[:space:]]' "$1" || return 0
     if HOOK_STATE=$(json_tool hooks-status "$1" "$2" 2>"$LOG"); then
         return 0
     fi
-    add_note "The inbox hooks were not changed: $(tilde "$1") is not valid JSON for the installer."
+    add_warning "The inbox hooks were not changed: $(tilde "$1") is not valid JSON for the installer."
     : >"$LOG"
     return 1
 }
@@ -1137,7 +1326,7 @@ hooks_install() {
     fi
     if ! commit_file "$hi_script" "$WORK/hook" 2>"$LOG" ||
         ! json_tool hooks-set "$hi_source" "$3" 2>"$LOG" || ! hooks_write "$hi_file"; then
-        add_note "The inbox hooks were not added: could not write $hi_where."
+        add_warning "The inbox hooks were not added: could not write $hi_where."
         : >"$LOG"
         return 0
     fi
@@ -1165,7 +1354,7 @@ hooks_uninstall() {
     fi
     if [ "$HOOK_STATE" != absent ]; then
         if ! json_tool hooks-remove "$hu_file" "$3" 2>"$LOG" || ! hooks_write "$hu_file"; then
-            add_note "The inbox hooks were not removed: could not write $hu_where."
+            add_warning "The inbox hooks were not removed: could not write $hu_where."
             : >"$LOG"
             return 0
         fi
@@ -1945,7 +2134,7 @@ codex_plugin_install() {
         return 0
     elif ! codex plugin marketplace add "$PLUGIN_REPO" >"$LOG" 2>&1 </dev/null ||
         ! codex plugin add "$PLUGIN_ID" >"$LOG" 2>&1 </dev/null; then
-        add_note "The plugin $PLUGIN_ID for the inbox hooks was not installed."
+        add_warning "The plugin $PLUGIN_ID for the inbox hooks was not installed."
         return 0
     else
         add_note "Installed the plugin $PLUGIN_ID for the inbox hooks."
@@ -2015,14 +2204,14 @@ codex_plugin_uninstall() {
     cp_removed=''
     if codex_has_plugin; then
         if [ "$DRY_RUN" = 0 ] && ! codex plugin remove "$PLUGIN_ID" >"$LOG" 2>&1 </dev/null; then
-            add_note "Could not remove the plugin $PLUGIN_ID."
+            add_warning "Could not remove the plugin $PLUGIN_ID."
             return 0
         fi
         cp_removed="the plugin $PLUGIN_ID"
     fi
     if output_has "\"name\":\"$PLUGIN_MARKETPLACE\"" codex plugin marketplace list --json; then
         if [ "$DRY_RUN" = 0 ] && ! codex plugin marketplace remove "$PLUGIN_MARKETPLACE" >"$LOG" 2>&1 </dev/null; then
-            add_note "Could not remove the plugin marketplace $PLUGIN_MARKETPLACE."
+            add_warning "Could not remove the plugin marketplace $PLUGIN_MARKETPLACE."
             return 0
         fi
         cp_removed="${cp_removed:+$cp_removed and }the marketplace $PLUGIN_MARKETPLACE"
@@ -2292,7 +2481,7 @@ run_agents() {
     say ""
     for AGENT in $AGENTS; do
         : >"$LOG"
-        WROTE='' USED=''
+        WROTE='' USED='' R_WARNING=''
         finish fail "stopped before the end."
         "${AGENT}_${ACTION}" || true
         if [ "$DRY_RUN" = 0 ]; then
@@ -2354,6 +2543,7 @@ main() {
     umask 077
     : "${HOME:?HOME is not set}"
     setup_output
+    TUI=0
     parse_args "$@"
     check_platform
     detect_tty
@@ -2367,6 +2557,10 @@ main() {
     find_json_tool
 
     USED=''
+    if [ "$HAVE_TTY" = 1 ] && [ "$YES" = 0 ] && [ -z "$AGENTS_ARG" ]; then
+        run_tui
+        return
+    fi
     say "${BOLD}Relaydeck installer${RESET}"
     say "Connects your coding agents to the Relaydeck app on iPhone, iPad, and Apple Watch."
     say "${DIM}Server: $URL${RESET}"
