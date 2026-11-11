@@ -1,6 +1,4 @@
-# AGENTS.md
-
-This file gives guidance to coding agents (Claude Code, Codex) that work in this repository.
+# Relaydeck server
 
 ## What this is
 
